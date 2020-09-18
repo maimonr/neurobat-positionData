@@ -22,6 +22,7 @@ classdef positionData < ephysData
         
         batPos % XY positions of each bat in a nested map, indexed by expDate and then batNum
         posTS % timestamps of positions in a map indexed by expDate
+        foodTime
         tracking_data_dir
         video_data_dir
         call_data_dir
@@ -43,8 +44,7 @@ classdef positionData < ephysData
             pd = pd@ephysData('adult_social'); % base pd on ephysData to get basic experimental metadata
             pd.tracking_data_dir = fullfile(pd.baseDirs{1},'tracking_data');
             pd.video_data_dir = fullfile(pd.baseDirs{1},'video_data');
-            pd.call_data_dir = fullfile(pd.baseDirs{1},'call_data');
-            
+
             mov_window_samples = pd.gap_fill_window_s*pd.video_fs; % get number of frames over which to perform moving window cleaning of positions
             
             % get a list of all LEDtracking results and the corresponding
@@ -68,6 +68,7 @@ classdef positionData < ephysData
             nExp = length(exp_date_strs);
             used_exp_idx = true(1,nExp);
             [bat_pos_cell, pos_ts_cell] = deal(cell(1,nExp));
+            foodTimes = nan(1,nExp);
             
             for exp_k = 1:nExp
                 led_track_fname = fullfile(led_track_fnames(exp_k).folder,led_track_fnames(exp_k).name);
@@ -81,6 +82,9 @@ classdef positionData < ephysData
                     used_exp_idx(exp_k) = false;
                     continue
                 end
+                
+                % get food session time
+                foodTimes(exp_k) = get_food_time(pd,expDates(exp_k));
                 
                 % load frame_ts_info and LEDtracks
                 s = load(frame_ts_info_fname);
@@ -123,6 +127,7 @@ classdef positionData < ephysData
             % form 'mmddyyyy'
             pd.batPos = containers.Map(exp_date_strs(used_exp_idx),bat_pos_cell(used_exp_idx));
             pd.posTS = containers.Map(exp_date_strs(used_exp_idx),pos_ts_cell(used_exp_idx));
+            pd.foodTime = containers.Map(exp_date_strs(used_exp_idx),foodTimes(used_exp_idx));
             
         end
         function pos = get_pos(pd,expDate,batNum)
@@ -263,6 +268,7 @@ classdef positionData < ephysData
                 callTimes = cData('expDay',expDates(exp_k)).callPos; % returns array of call start and stop times (in s) that occurred on this expDate
                 callTimes = 1e3*callTimes(:,1); % use only call start times and convert to ms
                 calling_bat_nums = cData('expDay',expDates(exp_k)).batNum'; % gets the batID that produced these calls
+                callIDs = cData('expDay',expDates(exp_k)).callID';
                 
                 % if provided, limit to calls separated by minimum inter
                 % call interval
@@ -270,6 +276,7 @@ classdef positionData < ephysData
                     callIdx = [Inf; diff(callTimes)] > inter_call_int;
                     callTimes = callTimes(callIdx);
                     calling_bat_nums = calling_bat_nums(callIdx);
+                    callIDs = callIDs(callIdx);
                 end
                 
                 % get the frame timestamps for this expDate
@@ -297,7 +304,7 @@ classdef positionData < ephysData
                 for bat_k = 1:nBat
                     current_bat_pos = pos(pd.all_bat_nums(bat_k));
                     current_bat_pos = cellfun(@(idx) nanmean(current_bat_pos(idx,:)),call_pos_idx,'un',0);
-                    current_call_pos{bat_k} = struct('pos',current_bat_pos,'caller',calling_bat_nums);
+                    current_call_pos{bat_k} = struct('pos',current_bat_pos,'caller',calling_bat_nums,'callID',num2cell(callIDs));
                 end
                 % create map of structs indexed by batNums
                 callPos{exp_k} = containers.Map(pd.all_bat_nums,current_call_pos);
@@ -352,15 +359,16 @@ classdef positionData < ephysData
                     
                     % get the calling bat ID for each call and assert that
                     % the list of calling bats is the same across bats
-                    calling_bat_nums = cellfun(@(bat) {bat.caller},current_call_bat_pos,'un',0);
-                    assert(all(~cellfun(@ischar,calling_bat_nums{1}) | strcmp(calling_bat_nums{:})))
+                    callIDs = cellfun(@(bat) [bat.callID],current_call_bat_pos,'un',0);
+                    assert(isequal(callIDs{:}))
                     
+                    calling_bat_nums = cellfun(@(bat) {bat.caller},current_call_bat_pos,'un',0);
                     % get the array of positions for both bat in this pair
                     current_call_bat_pos = cellfun(@(bat) vertcat(bat.pos),current_call_bat_pos,'un',0);
                     % calculate the distance between this pair of bats
                     current_call_dist = vecnorm(current_call_bat_pos{1} - current_call_bat_pos{2},2,2)';
                     % save as a struct with fields 'dist' and 'caller'
-                    bat_call_dist{bat_pair_k} = struct('dist',num2cell(current_call_dist),'caller',calling_bat_nums{1});
+                    bat_call_dist{bat_pair_k} = struct('dist',num2cell(current_call_dist),'caller',calling_bat_nums{1},'callID',num2cell(callIDs{1}));
                 end
                 % create map of structs indexed by bat pair strings
                 bat_pair_keys = pd.get_pair_keys(batPairs);
@@ -368,8 +376,27 @@ classdef positionData < ephysData
             end
             % create a map of maps indexed by expDate
             callDist = containers.Map(exp_date_strs,callDist);
+        end                
+        function callMap = collect_by_calls(~,call_data_map)
+            callMap = containers.Map('KeyType','double','ValueType','any');
+            for expKey = call_data_map.keys
+                expData = call_data_map(expKey{1});
+                for batKey = expData.keys
+                    batData = expData(batKey{1});
+                    callIDs = [batData.callID];
+                    call_k = 1;
+                    for call_id = callIDs
+                        if isKey(callMap,call_id)
+                            callMap(call_id) = [callMap(call_id) batData(call_k).dist];
+                        else
+                            callMap(call_id) = batData(call_k).dist;
+                        end
+                        call_k = call_k + 1;
+                    end
+                end
+            end
         end
-        
+
         function exp_date_strs = datetime2expstr(~,expDates)
             % utility function to convert datetimes to date strings.
             % returns as cell array of strings, unless only one date is
@@ -552,6 +579,49 @@ dateIdx = pd.recLogs.Date == expDate & strcmp(pd.recLogs.Session,pd.sessionType)
 assert(sum(dateIdx) == 1)
 rec_logs_exp = pd.recLogs(dateIdx,:);
 bat_color_table = table(rec_logs_exp{1,bat_idx}',rec_logs_exp{1,color_idx}','VariableNames',{'batNum','color'});
+end
+
+function sync_bat_num = get_sync_bat_num(pd,expDate)
+
+dateIdx = pd.recLogs.Date == expDate & strcmp(pd.recLogs.Session,pd.sessionType);
+
+sync_logger_num = num2str(pd.recLogs.Sync_logger_num(dateIdx));
+
+NL_idx = find(contains(pd.recLogs.Properties.VariableNames,'NL_'));
+NLStrs = strsplit(pd.recLogs.Properties.VariableNames{NL_idx(pd.recLogs{dateIdx,NL_idx} == str2double(sync_logger_num))},'_');
+batStr = strjoin({'Bat',NLStrs{2}},'_');
+sync_bat_num = num2str(pd.recLogs.(batStr)(dateIdx));
+
+end
+
+function foodTime = get_food_time(pd,expDate)
+
+call_data_dir = fullfile(pd.baseDirs{1},'call_data');
+event_file_dir = fullfile(pd.baseDirs{1},'event_file_data');
+exp_date_str = datestr(expDate,'yyyymmdd');
+exp_rec_logs = pd.recLogs(pd.recLogs.Date == expDate & ~strcmp(pd.recLogs.Session,'playback'),:);
+first_session_type = exp_rec_logs.Session{1};
+
+switch first_session_type
+    case 'vocal'
+        audio2nlg_fname = fullfile(call_data_dir,[exp_date_str '_audio2nlg_fit.mat']);
+    case 'social'
+        audio2nlg_fname = fullfile(call_data_dir,[exp_date_str '_audio2nlg_fit_social.mat']);
+end
+
+audio2nlg = load(audio2nlg_fname);
+
+sync_bat_num = get_sync_bat_num(pd,expDate);
+event_file_fname = fullfile(event_file_dir,[sync_bat_num '_' exp_date_str '_EVENTS.mat']);
+eventData = load(event_file_fname);
+
+foodIdx = contains(eventData.event_types_and_details,'banana');
+if any(foodIdx)
+    foodTime = 1e-3*eventData.event_timestamps_usec(foodIdx) - audio2nlg.first_nlg_pulse_time;
+else
+    foodTime = NaN;
+end
+
 end
 
 function [xSub,idx] = inRange(x,bounds)
