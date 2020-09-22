@@ -442,6 +442,29 @@ classdef positionData < ephysData
             end
         end
         
+        function [dist_matrix_corr, mantel_pval] = compare_dist_matrices(pd,varargin)
+            %% gets correlation values between distance matrices across days and corresponding Mantel Test p-values 
+            % Inputs:
+            % nRep: number of permutations to perform for p-values
+            % exclDates: dates to exclude (NOTE: this analysis requires
+            % that all dates have the same bats)
+            % Outputs:
+            % dist_matrix_corr: correlation values between each expDates
+            % distance matrix and the average distance matrix across all
+            % other dates
+            % mantel_pval: corresponding p-values for those correlation
+            pnames = {'nRep','exclDates'};
+            dflts  = {1e4,'08032020'};
+            [nRep,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            exp_date_strs = pd.batPos.keys;
+            exp_date_strs = setdiff(exp_date_strs,exclDates);
+            expDist = cellfun(@(expDay) posData.get_pairwise_dist(expDay),exp_date_strs,'un',0);
+            
+            assert(all(cellfun(@(x) all(strcmp(x.keys,expDist{1}.keys)),expDist)))
+            
+            expDist = cellfun(@(dist) squareform(cellfun(@nanmean,dist.values)),expDist,'un',0);
+            [dist_matrix_corr, mantel_pval]= cellfun(@(m,k) bramila_mantel(m,nanmedian(cat(3,expDist{setdiff(1:length(expDist),k)}),3),nRep,'pearson'),expDist,num2cell(1:length(expDist)));
+        end
         function [predTable,call_dist_and_corr] = get_call_dist_and_corr(pd,cData,bat_pair_corr_info,call_pair_type,varargin)
             %% gets pairwise distance and interbrain correlation between bats during calls
             % NOTE: This function is meant to analyze the relationship
@@ -572,51 +595,63 @@ classdef positionData < ephysData
         function predTable = get_session_call_dist_and_corr(pd,cData,bat_pair_corr_info,varargin)
             %% gets pairwise distance averaged across each session and average interbrain correlation across calls on the corresponding day
             % NOTE: This function is meant to analyze the relationship
-            % between inter-brain correlation around calls as a function of
-            % pairwise distance. For caller-to-listener ('c2l') correlation,
-            % this can be modeled as a straightforward correlation between
-            % distance and correlation between all c2l pairs:
-            % R(CL) ~ D(CL)
-            % For listener-to-listener ('l2l') correlation, the distance
-            % between listeners also needs to be taken into account:
-            % R(L1L2) ~ D(L1L2) + D(L1C) + D(L2C)
+            % between the average pairwise distance between bats in one
+            % session and the average interbrain correlation around calls
+            % in the same or another session.
             % Inputs:
-            % cData: callData object
+            % cData: callData object for either the vocal or social session
             % bat_pair_corr_info: output of 'calculate_all_cross_brain_lfp_corr'
             % which contains the instantaneous inter-brain correlation 
-            % between bats around calls.
-            % call_pair_type: Specifies  which type of inter-brain 
-            % correlation to look at. Either 'l2l' (listener-to-listener) 
-            % or 'c2l' (caller-to-listener). 
-            % inter_call_int: sets which calls to look at by
-            % inter-call interval
+            % between bats around calls either during the vocal or social
+            % session
+            % sessionSelection: Which part of the social session to look
+            % at: "all", "food", or "social"
+            % excl_bat_nums: which bats to exclude
+            % exclDates: which expDates to exclude
+            % included_call_type: for each bat pair, which types of calls 
+            % to average over. Can be "all" "calling" or "listening"
             % tLim: time limits relative to call onset over which to
             % average inter-brain correlation
+            % minCalls: minimum number of calls necessary to average over,
+            % otherwise value is set to NaN (default 10).
+            % calls_in_cluster: Flag indicating whether to restrict calls
+            % (in the social session) to those that occurred at most
+            % "clusterThresh" distance away
+            % clusterThresh: threshold for calls occuring "in cluster"
             % Ouputs: 
             % predTable: a table that can input into 'fitlm' to test the
             % relationship between distance and interbrain correlation.
-            % call_dist_and_corr: a structure containing maps indexed by
-            % callID listing the correlation and distance between bat pairs
+            
             pnames = {'sessionSelection','excl_bat_nums','exclDates','included_call_type','tLim','minCalls','calls_in_cluster','clusterThresh'};
             dflts  = {'social','11682',datetime(2020,8,3),'all',[-0.3 0.3],10,false,100};
             [sessionSelection,excl_bat_nums,exclDates,included_call_type,tLim,minCalls,calls_in_cluster,clusterThresh] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             [bat_pair_corr_map, included_call_map] = bat_pair_corr_info_2_map(bat_pair_corr_info,pd);
             
+            % if we want to restrict getting interbrain correlation values
+            % to calls where bats were within cluster distance of each, get
+            % the map of pairwise distance indexed by calls (only to be
+            % used when analyzing calls made in the social session)
             if calls_in_cluster
                 callDist = pd.get_call_dist(cData,'inter_call_int',0);
                 call_dist_by_calls = pd.collect_by_calls(callDist);
             end
             
+            % get list of callIDs to iterate over
             all_call_IDs = bat_pair_corr_map.keys;
             all_call_IDs = [all_call_IDs{:}];
             
+            % get the list of bat pairs, we're assuming here that the list
+            % doesn't change (if that's not right, then the variable
+            % batCats won't be right either)
             bat_pair_keys = keys(bat_pair_corr_map(all_call_IDs(1)));
             bat_pair_keys = bat_pair_keys(~contains(bat_pair_keys,excl_bat_nums));
             
+            % get the list of expDates to iterate over
             used_exp_date_strs = pd.batPos.keys;
             used_exp_dates = pd.expstr2datetime(used_exp_date_strs);
             used_exp_dates = setdiff(used_exp_dates,exclDates);
+            % get the time index around calls to average over
             [~,t_idx] = inRange(bat_pair_corr_info.time,tLim);
         
         function [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate)
@@ -662,68 +697,88 @@ classdef positionData < ephysData
             bat_call_corr = containers.Map('KeyType','char','ValueType','any');
             
             for expDate = used_exp_dates
+                % get the expDate string used for keys
                 current_date_key = pd.datetime2expstr(expDate);
-                
+                % get the pairwise distance between all bats for this day
                 current_exp_dist = pd.get_pairwise_dist(expDate,'sessionSelection',sessionSelection);
-                
+                % get a (unordered) list of all callIDs made on this day
                 exp_call_IDs = cData('expDay',expDate).callID';
+                % only use call for which interbrain corr also exists
                 exp_call_IDs = intersect(exp_call_IDs,all_call_IDs);
+                % get the (ordered) list of which bats produced these calls 
                 exp_calling_bat_nums = cellfun(@(callID) cData('callID',callID).batNum,num2cell(exp_call_IDs));
                 nCalls = length(exp_call_IDs);
-                
+                % only use the bat pairs we're interested in and that were
+                % present on this day
                 current_bat_pairs = intersect(bat_pair_keys,current_exp_dist.keys);
                 nPair = length(current_bat_pairs);
-                
+                % get the average pairwise distance on this day for each
+                % bat pair
                 expDist(current_date_key) = cellfun(@(key) nanmean(current_exp_dist(key)),current_bat_pairs);
                 
                 current_bat_call_corr = nan(1,nPair);
                 bat_pair_k = 1;
                 for bPair = current_bat_pairs
-                    bPair_split = strsplit(bPair{1},'-');
-                    used_call_IDs = [];
+                    bPair_split = strsplit(bPair{1},'-'); % split up this string to check for included_call_type
+                    used_call_IDs = []; % keep track of which call bouts have already been looked at
                     call_k = 1;
                     
                     switch included_call_type
-                        case 'all'
+                        case 'all' % use all call bouts on this day
                             callIdx = true(1,nCalls);
-                        case 'calling'
+                        case 'calling' % use only calls which one member of this bat pair produced
                             callIdx = cellfun(@(bNum) any(contains(bPair_split,bNum)),exp_calling_bat_nums);
-                        case 'listening'
+                        case 'listening' % use only calls which neither member of this bat pair produced
                             callIdx = cellfun(@(bNum) ~any(contains(bPair_split,bNum)),exp_calling_bat_nums);
                     end
                     
+                    % initialize list of correlation values during calls
+                    % that we will average over for this pair and day
                     current_call_corr = nan(1,sum(callIdx));
                     
-                    for callID = exp_call_IDs(callIdx)
-                        if calls_in_cluster
+                    for callID = exp_call_IDs(callIdx) % iterate over the calls made on this day which are "included"
+                        if calls_in_cluster % if true, restrict calls to those made when this bat pair were at most clusterThresh apart from each other
                             if isKey(call_dist_by_calls,callID)
                                 current_call_dist = call_dist_by_calls(callID);
                                 useCall = current_call_dist(bPair{1}) < clusterThresh;
-                            else
+                            else % if we don't have a distance for this call, don't use
                                 useCall = false;
                             end
                         else
                             useCall = true;
                         end
                         
-                        if ~ismember(callID,used_call_IDs) && useCall
-                            bpCorr = bat_pair_corr_map(callID);
-                            bpCorr = bpCorr(bPair{1});
-                            current_call_corr(call_k) = nanmean(bpCorr(t_idx));
-                            used_call_IDs = [used_call_IDs included_call_map(callID)]; %#ok<AGROW>
+                        if ~ismember(callID,used_call_IDs) && useCall % use this call if we haven't looked at other calls in this bout and if it meets the cluster restrictions
+                            bpCorr = bat_pair_corr_map(callID); % get this calls corr map indexed by bat pair
+                            bpCorr = bpCorr(bPair{1}); % get the time varying value of the interbrain correlation for this call for this pair
+                            current_call_corr(call_k) = nanmean(bpCorr(t_idx)); % average over the allotted time window
+                            used_call_IDs = [used_call_IDs included_call_map(callID)]; %#ok<AGROW> % add all calls in this bout to the "used" list so we don't double count bouts
                             call_k = call_k + 1;
                         end
                     end
-                    if call_k - 2 > minCalls
-                        current_bat_call_corr(bat_pair_k) = nanmean(current_call_corr);
+                    % only average over these calls if there were at least
+                    % minCalls made during this day
+                    if call_k - 2 > minCalls % subtract two because we 1-indexed and because of the trailing +1
+                        current_bat_call_corr(bat_pair_k) = nanmean(current_call_corr); 
                     end
                     bat_pair_k = bat_pair_k + 1;
                 end
+                % stores the list of average correlation values in the same
+                % order as the average distance values to allow for
+                % correlation
                 bat_call_corr(current_date_key) = current_bat_call_corr;
             end
+            % collect distance and correlation values into a table that can
+            % be input into fitlm
             distValues = expDist.values;
             corrValues = bat_call_corr.values;
+            % produce a column for the table that indicates which bat pair
+            % that value came from in order to account for varying levels
+            % of correlation across bat pairs in the regression (these
+            % values will not be right if different groups of bats were
+            % present across days)
             batCats = cellfun(@(corr) categorical(1:length(corr)),corrValues,'un',0);
+            % also keep track of expDates
             all_exp_dates = cellfun(@(expDate,corr) repmat(expDate,1,length(corr)),num2cell(used_exp_dates),corrValues,'un',0);
             
             distValues = [distValues{:}];
