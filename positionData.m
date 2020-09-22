@@ -2,16 +2,16 @@ classdef positionData < ephysData
     %% Class to perform and consolidate analysis relating to bat spatial position data
     % Initializing this class will collect all available tracking data and
     % organize it according to experiment date (expDate) and bat ID number
-    % (batNum). Then: 1) raw LED positions are read in 2) corresponding 
-    % video timestamps are read in 3) positions are organized by bat, and 
+    % (batNum). Then: 1) raw LED positions are read in 2) corresponding
+    % video timestamps are read in 3) positions are organized by bat, and
     % 4) cleaned up (centered, gaps filled, etc).
     %
     % The main data structures in a pData object are 'batPos' and 'posTS.'
     % Both are MATLAB "container.Maps" objects (i.e. dictionaries) that can
     % be accessed by unique keys. posTS is indexed by expDate and returns
     % the timestamps of the corresponding positions for all bats for that
-    % day. batPos is nested, with the first level of nesting indexed by 
-    % expDate, and the next level by batNum. 
+    % day. batPos is nested, with the first level of nesting indexed by
+    % expDate, and the next level by batNum.
     %%
     properties
         gap_fill_window_s = 2 % how long (in s) to fill in gaps in LED tracking
@@ -19,6 +19,7 @@ classdef positionData < ephysData
         all_bat_nums = [11636,11682,13688,14612,14654,14798,60064,71216,71335] % all bat numbers we'd like to keep track of
         sessionType = 'social' % only 'social' sessions work for now
         callOffset = 2 % time offset (in s) +/- around calls over which to average bat position
+        pixel2cm = 0.25 % factor to convert pixels to cm
         
         batPos % XY positions of each bat in a nested map, indexed by expDate and then batNum
         posTS % timestamps of positions in a map indexed by expDate
@@ -33,7 +34,7 @@ classdef positionData < ephysData
         
         function pd = positionData(varargin)
             %% Initializes positionData
-            % Inputs: 
+            % Inputs:
             % used_exp_dates: list of datetimes to limit analysis to
             % used_bat_nums: list of bat IDs to limit analysis to
             
@@ -44,12 +45,12 @@ classdef positionData < ephysData
             pd = pd@ephysData('adult_social'); % base pd on ephysData to get basic experimental metadata
             pd.tracking_data_dir = fullfile(pd.baseDirs{1},'tracking_data');
             pd.video_data_dir = fullfile(pd.baseDirs{1},'video_data');
-
+            
             mov_window_samples = pd.gap_fill_window_s*pd.video_fs; % get number of frames over which to perform moving window cleaning of positions
             
             % get a list of all LEDtracking results and the corresponding
             % expDates
-            led_track_fnames = dir(fullfile(pd.tracking_data_dir,['LEDtracking_pred_' pd.sessionType '*.mat'])); 
+            led_track_fnames = dir(fullfile(pd.tracking_data_dir,['LEDtracking_pred_' pd.sessionType '*.mat']));
             fnameSplit = arrayfun(@(x) strsplit(x.name,'_'),led_track_fnames,'un',0);
             exp_date_strs = cellfun(@(x) x{end}(1:end-4),fnameSplit,'un',0);
             expDates = pd.expstr2datetime(exp_date_strs);
@@ -62,7 +63,7 @@ classdef positionData < ephysData
             end
             
             if ~isempty(used_bat_nums) % if supplied, limit batNums to those supplied
-               pd.all_bat_nums = used_bat_nums; 
+                pd.all_bat_nums = used_bat_nums;
             end
             
             nExp = length(exp_date_strs);
@@ -89,7 +90,8 @@ classdef positionData < ephysData
                 % load frame_ts_info and LEDtracks
                 s = load(frame_ts_info_fname);
                 frame_ts_info = s.frame_ts_info;
-                LEDTracks = load(led_track_fname);
+                LEDTracks = load(led_track_fname,'file_frame_number','fileIdx',...
+                    'color_pred_model','predCentroids','predPosterior','predColors');
                 
                 % get index of frames for which we have timestamps and LED
                 % tracking results(should be ~99.9% of frames)
@@ -113,9 +115,10 @@ classdef positionData < ephysData
                 % impose the same order on the position matrix for each day
                 colorStrs = LEDTracks.color_pred_model.ClassificationSVM.ClassNames;
                 predCentroids = reorder_bat_pos(pd,predCentroids,colorStrs,expDates(exp_k));
+                % convert pixel values to cm
+                predCentroids = pd.pixel2cm*predCentroids;
                 % convert to cell before making into a Map
                 predCentroids = squeeze(num2cell(predCentroids,[1 2]));
-                
                 % each expDate's batPos Map is indexed by batNum (a double,
                 % not a string)
                 bat_pos_cell{exp_k} = containers.Map(pd.all_bat_nums,predCentroids);
@@ -130,12 +133,17 @@ classdef positionData < ephysData
             pd.foodTime = containers.Map(exp_date_strs(used_exp_idx),foodTimes(used_exp_idx));
             
         end
-        function pos = get_pos(pd,expDate,batNum)
+        function pos = get_pos(pd,expDate,batNum,varargin)
             % utility function to get bat position(s) for a given expDate
             % and, optionally, for a given batNum. expDate can be either a
             % datetime or a date string. Without a batNum, this returns
             % the map of bat positions for the expDate, with a batNum this
             % returns the array of positions for that bat on that date
+            
+            pnames = {'sessionSelection'};
+            dflts  = {'social'};
+            [sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
             if isdatetime(expDate)
                 expDate = datestr(expDate,'mmddyyyy');
             end
@@ -145,26 +153,50 @@ classdef positionData < ephysData
                     batNum = str2double(batNum);
                 end
                 pos = pos(batNum);
+                fTime = pd.foodTime(expDate);
+                t = pd.posTS(expDate);
+                switch sessionSelection
+                    case 'social'
+                        if isnan(fTime)
+                            return
+                        end
+                        idx = t < fTime;
+                    case 'food'
+                        if isnan(fTime)
+                            pos = [];
+                            return
+                        end
+                        idx = t > fTime;
+                    case 'all'
+                        idx = true(1,length(t));
+                end
+                pos = pos(idx,:);
             end
         end
         function t = get_time(pd,expDate)
-            % utlity function get timestamps for a given expDate. expDate 
+            % utlity function get timestamps for a given expDate. expDate
             % can be either a datetime or a date string.
             if isdatetime(expDate)
                 expDate = datestr(expDate,'mmddyyyy');
             end
             t = pd.posTS(expDate);
         end
-        function dist = get_dist(pd,batNums,expDate)
+        function dist = get_dist(pd,batNums,expDate,varargin)
             % gets the frame by frame euclidean distance between two bats
             % on a given expDate
-            % Inputs: 
+            % Inputs:
             % batNums: 1 x 2 array of batNums
             % expDate: datetime or date string
-            dist = vecnorm((get_pos(pd,expDate,batNums(1)) - get_pos(pd,expDate,batNums(2))),2,2);
+            
+            pnames = {'sessionSelection'};
+            dflts  = {'social'};
+            [sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            dist = vecnorm((get_pos(pd,expDate,batNums(1),'sessionSelection',sessionSelection)...
+                - get_pos(pd,expDate,batNums(2),'sessionSelection',sessionSelection)),2,2);
         end
         function pairDist = get_pairwise_dist(pd,expDate,varargin)
-            % gets pairwise distance between all pairs of bats. 
+            % gets pairwise distance between all pairs of bats.
             % Inputs:
             % used_bat_nums: optional list to limit which bats to look at
             % Outputs:
@@ -172,18 +204,18 @@ classdef positionData < ephysData
             % '[batNum1]-[batNum2]' whose values are the frame by frame
             % distance between that pair.
             
-            pnames = {'used_bat_nums'};
-            dflts  = {[]};
-            [used_bat_nums] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'used_bat_nums','sessionSelection'};
+            dflts  = {[],'social'};
+            [used_bat_nums,sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-            % first enumerate all possible bat pairs 
+            % first enumerate all possible bat pairs
             batPairs = get_bat_pairs(pd,'expDate',expDate,'used_bat_nums',used_bat_nums);
             
             % get the distance between each of those pairs
             nPairs = size(batPairs,1);
             pairDist = cell(1,nPairs);
             for bat_pair_k = 1:nPairs
-                pairDist{bat_pair_k} = get_dist(pd,batPairs(bat_pair_k,:),expDate);
+                pairDist{bat_pair_k} = get_dist(pd,batPairs(bat_pair_k,:),expDate,'sessionSelection',sessionSelection);
             end
             
             % convert the array of bat pairs into a list of strings of the
@@ -194,12 +226,12 @@ classdef positionData < ephysData
             
         end
         function batPairs = get_bat_pairs(pd,varargin)
-            % utility function to enumerate all bat pairs 
+            % utility function to enumerate all bat pairs
             % Inputs:
-            % expDate: optional datetime or date string to only list pairs 
+            % expDate: optional datetime or date string to only list pairs
             % of bats that were present on this day
             % used_bat_nums: optional list to limit which bats to look at
-            % Outputs: 
+            % Outputs:
             % batPairs: (nBat choose 2) x 2 array of bat numbers listing
             % all possible bat pairs
             pnames = {'expDate','used_bat_nums'};
@@ -224,7 +256,7 @@ classdef positionData < ephysData
         function bat_pair_keys = get_pair_keys(~,batPairs)
             % utility function to convert a nPair x 2 array of batNums to a
             % list of strings of the form '[batNum1]-[batNum2]'
-            bat_pair_keys = cellfun(@(batPair) num2str(batPair,'%d-%d'),num2cell(batPairs,2),'UniformOutput',false);
+            bat_pair_keys = cellfun(@(batPair) num2str(sort(batPair),'%d-%d'),num2cell(batPairs,2),'UniformOutput',false);
         end
         function batPairs = get_key_pairs(~,bat_pair_keys)
             % utility function to convert a list of bat pair strings back
@@ -235,16 +267,16 @@ classdef positionData < ephysData
         function callPos = get_call_pos(pd,cData,varargin)
             % gets the position of bats averaged around the time that a
             % call occurred across expDates.
-            % Inputs: 
+            % Inputs:
             % cData: callData object corresponding to this experiment
-            % inter_call_int: minimum interval (in ms) between call 
-            % occurrences, if provided, all calls separated by less than 
+            % inter_call_int: minimum interval (in ms) between call
+            % occurrences, if provided, all calls separated by less than
             % that amount are excluded
             % expDates: if provided, only look at these expDates. defaults
             % to using all expDates.
-            % Outputs: 
+            % Outputs:
             % callPos: nested map, first indexed by expDate, then by
-            % batNum. Values are structs with fields 'pos' and 'caller' 
+            % batNum. Values are structs with fields 'pos' and 'caller'
             % which contain the given bat's position and which bat made the
             % call, respectively
             
@@ -313,18 +345,18 @@ classdef positionData < ephysData
             callPos = containers.Map(exp_date_strs,callPos);
         end
         function callDist = get_call_dist(pd,cData,varargin)
-            % gets the distance between pairs of bats around the time that 
+            % gets the distance between pairs of bats around the time that
             % a call occurred across expDates.
-            % Inputs: 
+            % Inputs:
             % cData: callData object corresponding to this experiment
-            % inter_call_int: minimum interval (in ms) between call 
-            % occurrences, if provided, all calls separated by less than 
+            % inter_call_int: minimum interval (in ms) between call
+            % occurrences, if provided, all calls separated by less than
             % that amount are excluded
             % expDates: if provided, only look at these expDates. defaults
             % to using all expDates.
-            % Outputs: 
+            % Outputs:
             % callDist: nested map, first indexed by expDate, then by
-            % bat pair string. Values are structs with fields 'dist' and 
+            % bat pair string. Values are structs with fields 'dist' and
             % 'caller' which contain the given bat pair's distance and
             % which bat made the call, respectively
             pnames = {'inter_call_int','expDates'};
@@ -353,7 +385,7 @@ classdef positionData < ephysData
                 bat_call_dist = cell(1,nPairs);
                 % iterate over all bat pairs
                 for bat_pair_k = 1:nPairs
-                    % get the struct of position and calling batNum of both 
+                    % get the struct of position and calling batNum of both
                     % bats in this bat pair
                     current_call_bat_pos = cellfun(@(bat) current_bat_pos(bat),num2cell(batPairs(bat_pair_k,:)),'un',0);
                     
@@ -376,27 +408,294 @@ classdef positionData < ephysData
             end
             % create a map of maps indexed by expDate
             callDist = containers.Map(exp_date_strs,callDist);
-        end                
+        end
         function callMap = collect_by_calls(~,call_data_map)
+            %% reorganizes a call-distance map from indexing by expDates to
+            % indexing by callIDs
+            % Inputs:
+            % call_data_map: output of pd.get_call_dist
+            % Outputs:
+            % callMap: nested map indexed by callID and batPair which
+            % contains pairwise bat distances
+            
             callMap = containers.Map('KeyType','double','ValueType','any');
+            % iterate over expDates
             for expKey = call_data_map.keys
                 expData = call_data_map(expKey{1});
+                % iterate over bat pairs in this expDate
                 for batKey = expData.keys
                     batData = expData(batKey{1});
                     callIDs = [batData.callID];
                     call_k = 1;
+                    % iterate separately over callIDs for each batPair
                     for call_id = callIDs
-                        if isKey(callMap,call_id)
-                            callMap(call_id) = [callMap(call_id) batData(call_k).dist];
-                        else
-                            callMap(call_id) = batData(call_k).dist;
+                        if isKey(callMap,call_id) % if we've already added this callID for a different batPair
+                            bat_call_map = callMap(call_id); % get this call's distance map
+                            bat_call_map(batKey{1}) = batData(call_k).dist; % get this bat pair's distance for this call
+                            callMap(call_id) = bat_call_map; % replace this call's distance map with updated map
+                        else % if we haven't already, initialize a map for this call to be indexed by batPair
+                            callMap(call_id) = containers.Map(batKey{1},batData(call_k).dist);
                         end
                         call_k = call_k + 1;
                     end
                 end
             end
         end
+        
+        function [predTable,call_dist_and_corr] = get_call_dist_and_corr(pd,cData,bat_pair_corr_info,call_pair_type,varargin)
+            %% gets pairwise distance and interbrain correlation between bats during calls
+            % NOTE: This function is meant to analyze the relationship
+            % between inter-brain correlation around calls as a function of
+            % pairwise distance. For caller-to-listener ('c2l') correlation,
+            % this can be modeled as a straightforward correlation between
+            % distance and correlation between all c2l pairs:
+            % R(CL) ~ D(CL)
+            % For listener-to-listener ('l2l') correlation, the distance
+            % between listeners also needs to be taken into account:
+            % R(L1L2) ~ D(L1L2) + D(L1C) + D(L2C)
+            % Inputs:
+            % cData: callData object
+            % bat_pair_corr_info: output of 'calculate_all_cross_brain_lfp_corr'
+            % which contains the instantaneous inter-brain correlation 
+            % between bats around calls.
+            % call_pair_type: Specifies  which type of inter-brain 
+            % correlation to look at. Either 'l2l' (listener-to-listener) 
+            % or 'c2l' (caller-to-listener). 
+            % inter_call_int: sets which calls to look at by
+            % inter-call interval
+            % tLim: time limits relative to call onset over which to
+            % average inter-brain correlation
+            % Ouputs: 
+            % predTable: a table that can input into 'fitlm' to test the
+            % relationship between distance and interbrain correlation.
+            % call_dist_and_corr: a structure containing maps indexed by
+            % callID listing the correlation and distance between bat pairs
+            
+            pnames = {'inter_call_int','tLim'};
+            dflts  = {3e3,[-0.3 0.3]};
+            [inter_call_int,tLim] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            % get a map of call distance, indexed by callID
+            callDist = pd.get_call_dist(cData,'inter_call_int',inter_call_int);
+            call_dist_by_calls = pd.collect_by_calls(callDist);
+            
+            % convert the bat_pair_corr_info struct into a map indexed by
+            % callID. This also returns a map of all the callIDs included 
+            % in each call bout that weren't used explicitly because their
+            % inter_call_interval was too short
+            [bat_pair_corr_map, included_call_map] = bat_pair_corr_info_2_map(bat_pair_corr_info,pd);
+            
+            % get a list of callIDs to iterate over
+            all_call_ids = call_dist_by_calls.keys;
+            all_call_ids = [all_call_ids{:}];
+            
+            % get the index into the correlation around calls by time
+            [~,t_idx] = inRange(bat_pair_corr_info.time,tLim);
+            k = 1;
+            
+            % initialize maps
+            l2lCorr = containers.Map('KeyType','double','ValueType','any');
+            c2lDist = containers.Map('KeyType','double','ValueType','any');
+            l2lDist = containers.Map('KeyType','double','ValueType','any');
+            c2lCorr = containers.Map('KeyType','double','ValueType','any');
+            
+            % iterate over call IDs
+            for callID = all_call_ids
+                if isKey(bat_pair_corr_map,callID) % only use if this callID is a key in the bat_pair_corr_map
+                    % initialize values as empty
+                    [l2lCorr(callID),c2lDist(callID),l2lDist(callID),c2lCorr(callID)] = deal([]);
+                    
+                    % get the bat IDs of the bats that produced calls in
+                    % this call bout and deal with the case of overlapping
+                    % calls made by multiple bats
+                    calling_bat_nums = cData('callID',included_call_map(callID)').batNum;
+                    if any(cellfun(@iscell,calling_bat_nums))
+                        calling_bat_nums = [calling_bat_nums{:}];
+                    end
+                    calling_bat_nums = reshape(unique(calling_bat_nums),1,[]);
+                    
+                    % get this call's distance map and correlation map
+                    current_call_dist_map = call_dist_by_calls(callID);
+                    current_corr_map = bat_pair_corr_map(callID);
+                    
+                    % only use bat pairs shared between this call's
+                    % distance and correlation map
+                    current_bat_pairs = intersect(current_call_dist_map.keys,current_corr_map.keys);
+                    % select which of these bat pairs to look at for this
+                    % call
+                    switch call_pair_type
+                        case 'l2l' % only use bat pairs composed of bats that ~didn't~ produce this call
+                            bat_pair_idx = cellfun(@(bPair) ~any(contains(bPair,calling_bat_nums)),current_bat_pairs);
+                        case 'c2l' % only use bat pairs composed of bat that ~did~ produce this call
+                            bat_pair_idx = cellfun(@(bPair) any(contains(bPair,calling_bat_nums)),current_bat_pairs);
+                    end
+                    current_bat_pairs = current_bat_pairs(bat_pair_idx);
+                    
+                    % iterate over the bat pairs we're using for this call
+                    for batPair = current_bat_pairs
+                        % get the correlation values in time around this
+                        % call for this bat pair
+                        batCorr = current_corr_map(batPair{1});
+                        switch call_pair_type
+                            case 'l2l' % we need 4 values here
+                                l2lCorr(callID) = [l2lCorr(callID) nanmean(batCorr(t_idx))]; % get the average correlation between listeners during timeLims
+                                l2lDist(callID) = [l2lDist(callID) current_call_dist_map(batPair{1})]; % get the average distance between listeners during timeLims
+                                c2lDist = get_c2l_for_l2l(batPair,calling_bat_nums,current_call_dist_map,c2lDist); % get the average distance between the two pairs of listener-caller
+                            case 'c2l' % here we only need 2
+                                if any(ismember(calling_bat_nums,cData.batNums))
+                                    c2lDist(callID) = [c2lDist(callID) current_call_dist_map(batPair{1})]; % get the average correlation between caller and listener during timeLims
+                                    c2lCorr(callID) = [c2lCorr(callID) nanmean(batCorr(t_idx))]; % get the average distance between caller and listener during timeLims
+                                end
+                        end
+                    end
+                    k = k + 1;
+                end
+            end
+            
+            % organize into a table for linear model fitting
+            switch call_pair_type
+                
+                case 'l2l'
+                    l2lCorr_values = l2lCorr.values;l2lCorr_values = [l2lCorr_values{:}];
+                    c2lDist_values = c2lDist.values;c2lDist_values = [c2lDist_values{:}];
+                    l2lDist_values = l2lDist.values;l2lDist_values = [l2lDist_values{:}];
+                    predTable = table(l2lDist_values',nanmean(c2lDist_values)',l2lCorr_values','VariableNames',{'l2l','c2l','corr'});
+                case 'c2l'
+                    c2lCorr_values = l2lCorr.values;c2lCorr_values = [c2lCorr_values{:}];
+                    c2lDist_values = c2lDist.values;c2lDist_values = [c2lDist_values{:}];
+                    predTable = table(c2lDist_values',c2lCorr_values','VariableNames',{'c2l','corr'});
+                    
+            end
+            % organize into a structure for output
+            call_dist_and_corr = struct('l2lCorr',l2lCorr,'c2lDist',c2lDist,'l2lDist',l2lDist,'c2lCorr',c2lCorr);
+        end
+        function predTable = get_session_call_dist_and_corr(pd,cData,bat_pair_corr_info,varargin)
+            %% gets pairwise distance averaged across each session and average interbrain correlation across calls on the corresponding day
+            % NOTE: This function is meant to analyze the relationship
+            % between inter-brain correlation around calls as a function of
+            % pairwise distance. For caller-to-listener ('c2l') correlation,
+            % this can be modeled as a straightforward correlation between
+            % distance and correlation between all c2l pairs:
+            % R(CL) ~ D(CL)
+            % For listener-to-listener ('l2l') correlation, the distance
+            % between listeners also needs to be taken into account:
+            % R(L1L2) ~ D(L1L2) + D(L1C) + D(L2C)
+            % Inputs:
+            % cData: callData object
+            % bat_pair_corr_info: output of 'calculate_all_cross_brain_lfp_corr'
+            % which contains the instantaneous inter-brain correlation 
+            % between bats around calls.
+            % call_pair_type: Specifies  which type of inter-brain 
+            % correlation to look at. Either 'l2l' (listener-to-listener) 
+            % or 'c2l' (caller-to-listener). 
+            % inter_call_int: sets which calls to look at by
+            % inter-call interval
+            % tLim: time limits relative to call onset over which to
+            % average inter-brain correlation
+            % Ouputs: 
+            % predTable: a table that can input into 'fitlm' to test the
+            % relationship between distance and interbrain correlation.
+            % call_dist_and_corr: a structure containing maps indexed by
+            % callID listing the correlation and distance between bat pairs
+            pnames = {'sessionSelection','excl_bat_nums','exclDates','included_call_type','tLim','minCalls','calls_in_cluster','clusterThresh'};
+            dflts  = {'social','11682',datetime(2020,8,3),'all',[-0.3 0.3],10,false,100};
+            [sessionSelection,excl_bat_nums,exclDates,included_call_type,tLim,minCalls,calls_in_cluster,clusterThresh] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            [bat_pair_corr_map, included_call_map] = bat_pair_corr_info_2_map(bat_pair_corr_info,pd);
+            
+            if calls_in_cluster
+                callDist = pd.get_call_dist(cData,'inter_call_int',0);
+                call_dist_by_calls = pd.collect_by_calls(callDist);
+            end
+            
+            all_call_IDs = bat_pair_corr_map.keys;
+            all_call_IDs = [all_call_IDs{:}];
+            
+            bat_pair_keys = keys(bat_pair_corr_map(all_call_IDs(1)));
+            bat_pair_keys = bat_pair_keys(~contains(bat_pair_keys,excl_bat_nums));
+            
+            used_exp_date_strs = pd.batPos.keys;
+            used_exp_dates = pd.expstr2datetime(used_exp_date_strs);
+            used_exp_dates = setdiff(used_exp_dates,exclDates);
+            [~,t_idx] = inRange(bat_pair_corr_info.time,tLim);
 
+            expDist = containers.Map('KeyType','char','ValueType','any');
+            bat_call_corr = containers.Map('KeyType','char','ValueType','any');
+            
+            for expDate = used_exp_dates
+                current_date_key = pd.datetime2expstr(expDate);
+                
+                current_exp_dist = pd.get_pairwise_dist(expDate,'sessionSelection',sessionSelection);
+                
+                exp_call_IDs = cData('expDay',expDate).callID';
+                exp_call_IDs = intersect(exp_call_IDs,all_call_IDs);
+                exp_calling_bat_nums = cellfun(@(callID) cData('callID',callID).batNum,num2cell(exp_call_IDs));
+                nCalls = length(exp_call_IDs);
+                
+                current_bat_pairs = intersect(bat_pair_keys,current_exp_dist.keys);
+                nPair = length(current_bat_pairs);
+                
+                expDist(current_date_key) = cellfun(@(key) nanmean(current_exp_dist(key)),current_bat_pairs);
+                
+                current_bat_call_corr = nan(1,nPair);
+                bat_pair_k = 1;
+                for bPair = current_bat_pairs
+                    bPair_split = strsplit(bPair{1},'-');
+                    used_call_IDs = [];
+                    call_k = 1;
+                    
+                    switch included_call_type
+                        case 'all'
+                            callIdx = true(1,nCalls);
+                        case 'calling'
+                            callIdx = cellfun(@(bNum) any(contains(bPair_split,bNum)),exp_calling_bat_nums);
+                        case 'listening'
+                            callIdx = cellfun(@(bNum) ~any(contains(bPair_split,bNum)),exp_calling_bat_nums);
+                    end
+                    
+                    current_call_corr = nan(1,sum(callIdx));
+                    
+                    for callID = exp_call_IDs(callIdx)
+                        if calls_in_cluster
+                            if isKey(call_dist_by_calls,callID)
+                                current_call_dist = call_dist_by_calls(callID);
+                                useCall = current_call_dist(bPair{1}) < clusterThresh;
+                            else
+                                useCall = false;
+                            end
+                        else
+                            useCall = true;
+                        end
+                        
+                        if ~ismember(callID,used_call_IDs) && useCall
+                            bpCorr = bat_pair_corr_map(callID);
+                            bpCorr = bpCorr(bPair{1});
+                            current_call_corr(call_k) = nanmean(bpCorr(t_idx));
+                            used_call_IDs = [used_call_IDs included_call_map(callID)]; %#ok<AGROW>
+                            call_k = call_k + 1;
+                        end
+                    end
+                    if call_k - 2 > minCalls
+                        current_bat_call_corr(bat_pair_k) = nanmean(current_call_corr);
+                    end
+                    bat_pair_k = bat_pair_k + 1;
+                end
+                bat_call_corr(current_date_key) = current_bat_call_corr;
+            end
+            distValues = expDist.values;
+            corrValues = bat_call_corr.values;
+            batCats = cellfun(@(corr) categorical(1:length(corr)),corrValues,'un',0);
+            all_exp_dates = cellfun(@(expDate,corr) repmat(expDate,1,length(corr)),num2cell(used_exp_dates),corrValues,'un',0);
+            
+            distValues = [distValues{:}];
+            corrValues = [corrValues{:}];
+            batCats = [batCats{:}];
+            all_exp_dates = [all_exp_dates{:}];
+            predTable = table(distValues',corrValues',batCats',all_exp_dates','VariableNames',{'pos','corr','bat','date'});
+            
+        end
+        
+        
         function exp_date_strs = datetime2expstr(~,expDates)
             % utility function to convert datetimes to date strings.
             % returns as cell array of strings, unless only one date is
@@ -415,6 +714,25 @@ classdef positionData < ephysData
         end
         
     end
+end
+
+function c2lDist = get_c2l_for_l2l(batPair,calling_bat_nums,current_call_dist_map,c2lDist)
+
+listening_bat_nums = strsplit(batPair{1},'-');
+listening_bat_dist = nan(2,1);
+listen_bat_k = 1;
+for listenBat = listening_bat_nums
+    current_listen_bat_dist = nan(1,length(calling_bat_nums));
+    call_bat_k = 1;
+    for callBat = calling_bat_nums
+        current_bat_pair_key = strjoin(sort([callBat listenBat]),'-');
+        current_listen_bat_dist(call_bat_k) = current_call_dist_map(current_bat_pair_key);
+        call_bat_k = call_bat_k + 1;
+    end
+    listening_bat_dist(listen_bat_k) = nanmean(current_listen_bat_dist);
+    listen_bat_k = listen_bat_k + 1;
+end
+c2lDist(callID) = [c2lDist(callID) listening_bat_dist];
 end
 
 function pred_centroids = get_pred_centroids(LEDTracks)
@@ -548,10 +866,10 @@ frame_and_file_table_ts = array2table([frame_ts_info.file_frame_number;frame_ts_
 end
 
 function reordered_bat_pos = reorder_bat_pos(pd,batPos,colorStrs,expDate)
-% takes a nSample X 2 X nBat array of XY locations orderd according to the 
-% list of colors in the color prediction model, gets the batNums 
-% correspoding to those colors for this expDate and reorders it according 
-% to the order of bats present in pd.all_bat_nums 
+% takes a nSample X 2 X nBat array of XY locations orderd according to the
+% list of colors in the color prediction model, gets the batNums
+% correspoding to those colors for this expDate and reorders it according
+% to the order of bats present in pd.all_bat_nums
 
 bat_color_table = get_bat_color_table(pd,expDate);
 
@@ -630,6 +948,7 @@ bounds = sort(bounds);
 idx = x>bounds(1) & x<= bounds(2);
 xSub = x(idx);
 end
+
 
 
 
