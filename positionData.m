@@ -57,6 +57,7 @@ classdef positionData < ephysData
             
             if ~isempty(used_exp_dates) % if supplied, limit expDates to those supplied
                 [~,used_date_idx] = ismember(expDates,used_exp_dates);
+                used_date_idx = logical(used_date_idx);
                 expDates = expDates(used_date_idx);
                 exp_date_strs = exp_date_strs(used_date_idx);
                 led_track_fnames = led_track_fnames(used_date_idx);
@@ -91,7 +92,7 @@ classdef positionData < ephysData
                 s = load(frame_ts_info_fname);
                 frame_ts_info = s.frame_ts_info;
                 LEDTracks = load(led_track_fname,'file_frame_number','fileIdx',...
-                    'color_pred_model','predCentroids','predPosterior','predColors');
+                    'color_pred_model','centroidLocs','predPosterior','predColors');
                 
                 % get index of frames for which we have timestamps and LED
                 % tracking results(should be ~99.9% of frames)
@@ -772,17 +773,20 @@ classdef positionData < ephysData
         end
         
         % functions to analyze full session lfp power and position/distance
-        function [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate)
+        function [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate,varargin)
+            pnames = {'sessionSelection'};
+            dflts  = {'social'};
+            [sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             lfpData = load_all_session_lfp_power(pd,expDate);
-            [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate);
+            [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate,'sessionSelection',sessionSelection);
         end
         function [pairDist, pairCorr, video_t_rs, lfp_fs] = get_aligned_corr_dist(pd,expDate,varargin)
             
-            pnames = {'lfp_fill_win','corr_smooth_scale'};
-            dflts  = {10,100};
-            [lfp_fill_win, corr_smooth_scale] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'lfp_fill_win','corr_smooth_scale','sessionSelection'};
+            dflts  = {10,100,'social'};
+            [lfp_fill_win, corr_smooth_scale, sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-            [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate);
+            [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate,'sessionSelection',sessionSelection);
             
             used_bat_nums = lfpResample.keys;
             used_bat_nums = [used_bat_nums{:}];
@@ -808,6 +812,38 @@ classdef positionData < ephysData
             pairDist = containers.Map(bat_pair_keys,pairDist);
             pairCorr = containers.Map(bat_pair_keys,pairCorr);
             
+        end
+        function [all_pair_dist, all_pair_corr] = get_all_session_corr_dist(pd,varargin)
+            
+            pnames = {'excl_bat_nums','corr_smooth_scale','exclDates'};
+            dflts  = {'11682',100,{'08052020','08032020'}};
+            [excl_bat_nums, corr_smooth_scale, exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            batNums = str2double(setdiff(pd.batNums,excl_bat_nums));
+            batPairs = pd.get_bat_pairs('used_bat_nums',batNums);
+            bat_pair_keys = pd.get_pair_keys(batPairs);
+            
+            all_pair_corr = containers.Map('KeyType','char','ValueType','any');
+            all_pair_dist = containers.Map('KeyType','char','ValueType','any');
+            
+            expDates = pd.batPos.keys;
+            expDates = setdiff(expDates,exclDates);
+            expDates = pd.expstr2datetime(expDates);
+            
+            for expDate = expDates
+                [pairDist, pairCorr] = get_aligned_corr_dist(pd,expDate,'corr_smooth_scale',corr_smooth_scale);
+                for batPair = bat_pair_keys'
+                    if isKey(pairCorr,batPair{1})
+                        if ~isKey(all_pair_corr,batPair{1})
+                            all_pair_corr(batPair{1}) = pairCorr(batPair{1});
+                            all_pair_dist(batPair{1}) = pairDist(batPair{1});
+                        else
+                            all_pair_corr(batPair{1}) = [all_pair_corr(batPair{1}); pairCorr(batPair{1})];
+                            all_pair_dist(batPair{1}) = [all_pair_dist(batPair{1}); pairDist(batPair{1})];
+                        end
+                    end
+                end
+            end
         end
     end
 end
@@ -1085,7 +1121,28 @@ end
 
 end
 
-function [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate)
+function [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate,varargin)
+
+pnames = {'sessionSelection'};
+dflts  = {'social'};
+[sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+
+exp_date_str = pd.datetime2expstr(expDate);
+fTime = 1e-3*pd.foodTime(exp_date_str);
+video_t = 1e-3*pd.posTS(exp_date_str);
+
+if ~isnan(fTime)
+    switch sessionSelection
+        case 'social'
+            session_t_idx = video_t < fTime;
+        case 'food'
+            session_t_idx = video_t > fTime;
+        case 'all'
+            session_t_idx = true(size(video_t));
+    end
+else
+    session_t_idx = true(size(video_t));
+end
 
 roundingFactor = 100;
 
@@ -1095,9 +1152,10 @@ lfp_fs = round(roundingFactor*lfp_fs)/roundingFactor;
 [N,D] = rat(lfp_fs/pd.video_fs);
 
 tRange = [max(cellfun(@min,{lfpData.lfp_power_timestamps})) min(cellfun(@max,{lfpData.lfp_power_timestamps}))];
-exp_date_str = pd.datetime2expstr(expDate);
-video_t = 1e-3*pd.posTS(exp_date_str);
-[video_t,t_range_idx] = inRange(video_t,tRange);
+
+[~,lfp_t_idx] = inRange(video_t,tRange);
+t_range_idx = lfp_t_idx & session_t_idx;
+video_t = video_t(t_range_idx);
 video_t_rs = resample(video_t,N,D,0);
 
 pos = pd.get_pos(exp_date_str);
