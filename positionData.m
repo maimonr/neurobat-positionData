@@ -31,7 +31,7 @@ classdef positionData < ephysData
     end
     
     methods
-        
+        % main utility functions
         function pd = positionData(varargin)
             %% Initializes positionData
             % Inputs:
@@ -264,6 +264,24 @@ classdef positionData < ephysData
             batPairs = cellfun(@(pairKey) str2double(strsplit(pairKey,'-')),bat_pair_keys,'un',0);
             batPairs = vertcat(batPairs{:});
         end
+        function exp_date_strs = datetime2expstr(~,expDates)
+            % utility function to convert datetimes to date strings.
+            % returns as cell array of strings, unless only one date is
+            % provided.
+            exp_date_strs = cellfun(@(expDate) datestr(expDate,'mmddyyyy'),num2cell(expDates),'un',0);
+            if length(exp_date_strs) == 1
+                exp_date_strs = exp_date_strs{1};
+            end
+        end
+        function expDates = expstr2datetime(~,exp_date_strs)
+            % utility function to convert date strings into datetimes
+            if ~iscell(exp_date_strs)
+                exp_date_strs = {exp_date_strs};
+            end
+            expDates = cellfun(@(dateStr) datetime(dateStr,'InputFormat','MMddyyyy'),exp_date_strs);
+        end
+        
+        % functions to get call related position/distance data
         function callPos = get_call_pos(pd,cData,varargin)
             % gets the position of bats averaged around the time that a
             % call occurred across expDates.
@@ -442,6 +460,7 @@ classdef positionData < ephysData
             end
         end
         
+        % functions to analyze distance alone
         function [dist_matrix_corr, mantel_pval] = compare_dist_matrices(pd,varargin)
             %% gets correlation values between distance matrices across days and corresponding Mantel Test p-values 
             % Inputs:
@@ -465,6 +484,8 @@ classdef positionData < ephysData
             expDist = cellfun(@(dist) squareform(cellfun(@nanmean,dist.values)),expDist,'un',0);
             [dist_matrix_corr, mantel_pval]= cellfun(@(m,k) bramila_mantel(m,nanmedian(cat(3,expDist{setdiff(1:length(expDist),k)}),3),nRep,'pearson'),expDist,num2cell(1:length(expDist)));
         end
+        
+        % functions to analyze call distance and inter-brain correlation
         function [predTable,call_dist_and_corr] = get_call_dist_and_corr(pd,cData,bat_pair_corr_info,call_pair_type,varargin)
             %% gets pairwise distance and interbrain correlation between bats during calls
             % NOTE: This function is meant to analyze the relationship
@@ -601,14 +622,14 @@ classdef positionData < ephysData
             % Inputs:
             % cData: callData object for either the vocal or social session
             % bat_pair_corr_info: output of 'calculate_all_cross_brain_lfp_corr'
-            % which contains the instantaneous inter-brain correlation 
+            % which contains the instantaneous inter-brain correlation
             % between bats around calls either during the vocal or social
             % session
             % sessionSelection: Which part of the social session to look
             % at: "all", "food", or "social"
             % excl_bat_nums: which bats to exclude
             % exclDates: which expDates to exclude
-            % included_call_type: for each bat pair, which types of calls 
+            % included_call_type: for each bat pair, which types of calls
             % to average over. Can be "all" "calling" or "listening"
             % tLim: time limits relative to call onset over which to
             % average inter-brain correlation
@@ -618,7 +639,7 @@ classdef positionData < ephysData
             % (in the social session) to those that occurred at most
             % "clusterThresh" distance away
             % clusterThresh: threshold for calls occuring "in cluster"
-            % Ouputs: 
+            % Ouputs:
             % predTable: a table that can input into 'fitlm' to test the
             % relationship between distance and interbrain correlation.
             
@@ -653,46 +674,7 @@ classdef positionData < ephysData
             used_exp_dates = setdiff(used_exp_dates,exclDates);
             % get the time index around calls to average over
             [~,t_idx] = inRange(bat_pair_corr_info.time,tLim);
-        
-        function [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate)
-            lfpData = load_all_session_lfp_power(pd,expDate);
-            [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate);
-        end
-        
-        function [pairDist, pairCorr, video_t_rs, lfp_fs] = get_aligned_corr_dist(pd,expDate,varargin)
             
-            pnames = {'lfp_fill_win','corr_smooth_scale'};
-            dflts  = {10,100};
-            [lfp_fill_win, corr_smooth_scale] = internal.stats.parseArgs(pnames,dflts,varargin{:});
-            
-            [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate);
-            
-            used_bat_nums = lfpResample.keys;
-            used_bat_nums = [used_bat_nums{:}];
-            % first enumerate all possible bat pairs 
-            batPairs = get_bat_pairs(pd,'expDate',expDate,'used_bat_nums',used_bat_nums);
-            
-            % get the distance between each of those pairs
-            nPairs = size(batPairs,1);
-            [pairDist, pairCorr] = deal(cell(1,nPairs));
-            
-            for bat_pair_k = 1:nPairs
-                pairDist{bat_pair_k} = vecnorm(posResample(batPairs(bat_pair_k,1)) - posResample(batPairs(bat_pair_k,2)),2,2);
-                
-                current_lfp_data = cellfun(@(bNum) nanmedian(lfpResample(bNum),1)',num2cell(batPairs(bat_pair_k,:)),'un',0);
-                current_lfp_data = fillmissing([current_lfp_data{:}],'movmean',lfp_fill_win);
-                pairCorr{bat_pair_k} = movCorr(current_lfp_data(:,1),current_lfp_data(:,2),corr_smooth_scale,0);
-            end
-            
-            % convert the array of bat pairs into a list of strings of the
-            % form '[batNum1]-[batNum2]' to use as keys into the Map of
-            % pairwise distances
-            bat_pair_keys = pd.get_pair_keys(batPairs);
-            pairDist = containers.Map(bat_pair_keys,pairDist);
-            pairCorr = containers.Map(bat_pair_keys,pairCorr);
-            
-        end
-
             expDist = containers.Map('KeyType','char','ValueType','any');
             bat_call_corr = containers.Map('KeyType','char','ValueType','any');
             
@@ -705,7 +687,7 @@ classdef positionData < ephysData
                 exp_call_IDs = cData('expDay',expDate).callID';
                 % only use call for which interbrain corr also exists
                 exp_call_IDs = intersect(exp_call_IDs,all_call_IDs);
-                % get the (ordered) list of which bats produced these calls 
+                % get the (ordered) list of which bats produced these calls
                 exp_calling_bat_nums = cellfun(@(callID) cData('callID',callID).batNum,num2cell(exp_call_IDs));
                 nCalls = length(exp_call_IDs);
                 % only use the bat pairs we're interested in and that were
@@ -759,7 +741,7 @@ classdef positionData < ephysData
                     % only average over these calls if there were at least
                     % minCalls made during this day
                     if call_k - 2 > minCalls % subtract two because we 1-indexed and because of the trailing +1
-                        current_bat_call_corr(bat_pair_k) = nanmean(current_call_corr); 
+                        current_bat_call_corr(bat_pair_k) = nanmean(current_call_corr);
                     end
                     bat_pair_k = bat_pair_k + 1;
                 end
@@ -789,24 +771,44 @@ classdef positionData < ephysData
             
         end
         
-        
-        function exp_date_strs = datetime2expstr(~,expDates)
-            % utility function to convert datetimes to date strings.
-            % returns as cell array of strings, unless only one date is
-            % provided.
-            exp_date_strs = cellfun(@(expDate) datestr(expDate,'mmddyyyy'),num2cell(expDates),'un',0);
-            if length(exp_date_strs) == 1
-                exp_date_strs = exp_date_strs{1};
-            end
+        % functions to analyze full session lfp power and position/distance
+        function [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate)
+            lfpData = load_all_session_lfp_power(pd,expDate);
+            [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate);
         end
-        function expDates = expstr2datetime(~,exp_date_strs)
-            % utility function to convert date strings into datetimes
-            if ~iscell(exp_date_strs)
-                exp_date_strs = {exp_date_strs};
+        function [pairDist, pairCorr, video_t_rs, lfp_fs] = get_aligned_corr_dist(pd,expDate,varargin)
+            
+            pnames = {'lfp_fill_win','corr_smooth_scale'};
+            dflts  = {10,100};
+            [lfp_fill_win, corr_smooth_scale] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate);
+            
+            used_bat_nums = lfpResample.keys;
+            used_bat_nums = [used_bat_nums{:}];
+            % first enumerate all possible bat pairs
+            batPairs = get_bat_pairs(pd,'expDate',expDate,'used_bat_nums',used_bat_nums);
+            
+            % get the distance between each of those pairs
+            nPairs = size(batPairs,1);
+            [pairDist, pairCorr] = deal(cell(1,nPairs));
+            
+            for bat_pair_k = 1:nPairs
+                pairDist{bat_pair_k} = vecnorm(posResample(batPairs(bat_pair_k,1)) - posResample(batPairs(bat_pair_k,2)),2,2);
+                
+                current_lfp_data = cellfun(@(bNum) nanmedian(lfpResample(bNum),1)',num2cell(batPairs(bat_pair_k,:)),'un',0);
+                current_lfp_data = fillmissing([current_lfp_data{:}],'movmean',lfp_fill_win);
+                pairCorr{bat_pair_k} = movCorr(current_lfp_data(:,1),current_lfp_data(:,2),corr_smooth_scale,0);
             end
-            expDates = cellfun(@(dateStr) datetime(dateStr,'InputFormat','MMddyyyy'),exp_date_strs);
+            
+            % convert the array of bat pairs into a list of strings of the
+            % form '[batNum1]-[batNum2]' to use as keys into the Map of
+            % pairwise distances
+            bat_pair_keys = pd.get_pair_keys(batPairs);
+            pairDist = containers.Map(bat_pair_keys,pairDist);
+            pairCorr = containers.Map(bat_pair_keys,pairCorr);
+            
         end
-        
     end
 end
 
@@ -994,7 +996,7 @@ bat_color_table = table(rec_logs_exp{1,bat_idx}',rec_logs_exp{1,color_idx}','Var
 end
 
 function sync_bat_num = get_sync_bat_num(pd,expDate)
-
+%% gets the bat that was chose as the 'sync' bat, which has the relevant session strings logged in its eventlog file
 dateIdx = pd.recLogs.Date == expDate & strcmp(pd.recLogs.Session,pd.sessionType);
 
 sync_logger_num = num2str(pd.recLogs.Sync_logger_num(dateIdx));
@@ -1006,14 +1008,23 @@ sync_bat_num = num2str(pd.recLogs.(batStr)(dateIdx));
 
 end
 
-function foodTime = get_food_time(pd,expDate)
+function foodTime = get_food_time(pd,expDate,varargin)
+%% gets the time of food delivery by looking in the eventlog file for a food related string 
+
+pnames = {'foodStr'};
+dflts  = {'banana'};
+[foodStr] = internal.stats.parseArgs(pnames,dflts,varargin{:});
 
 call_data_dir = fullfile(pd.baseDirs{1},'call_data');
 event_file_dir = fullfile(pd.baseDirs{1},'event_file_data');
 exp_date_str = datestr(expDate,'yyyymmdd');
+% get this day's recording logs and check which session came first, social
+% or vocal 
 exp_rec_logs = pd.recLogs(pd.recLogs.Date == expDate & ~strcmp(pd.recLogs.Session,'playback'),:);
 first_session_type = exp_rec_logs.Session{1};
 
+% get the audio2nlg file for whichever session came first, as the first TTL
+% pulse from that session is defined as time zero
 switch first_session_type
     case 'vocal'
         audio2nlg_fname = fullfile(call_data_dir,[exp_date_str '_audio2nlg_fit.mat']);
@@ -1023,11 +1034,13 @@ end
 
 audio2nlg = load(audio2nlg_fname);
 
+% sync bat is he one that will have the foodstr in its log
 sync_bat_num = get_sync_bat_num(pd,expDate);
 event_file_fname = fullfile(event_file_dir,[sync_bat_num '_' exp_date_str '_EVENTS.mat']);
 eventData = load(event_file_fname);
 
-foodIdx = contains(eventData.event_types_and_details,'banana');
+% get the food time, and if the foodStr couldn't be found, return NaN
+foodIdx = contains(eventData.event_types_and_details,foodStr);
 if any(foodIdx)
     foodTime = 1e-3*eventData.event_timestamps_usec(foodIdx) - audio2nlg.first_nlg_pulse_time;
 else
@@ -1044,9 +1057,15 @@ xSub = x(idx);
 end
 
 function all_session_lfp_power = load_all_session_lfp_power(pd,expDate,varargin)
+%% loads the pre-calculated lfp power for all bats present on a given date
+% Inputs: 
+% expDate: which expDate to get lfp data for
+% max_artifacts_fract: maximum fraction of samples in a window in which lfp
+% power was calculated to use, any window over that will be set to NaN
+% freq_k: which frequency band to use
 
 pnames = {'max_artifact_fract','freq_k'};
-dflts  = {0.01,2,100};
+dflts  = {0.01,2};
 [max_artifact_fract, freq_k] = internal.stats.parseArgs(pnames,dflts,varargin{:});
 
 lfp_data_dir = fullfile(pd.baseDirs{1},'lfp_data');
@@ -1056,7 +1075,9 @@ end
 
 lfpFnames = dir(fullfile(lfp_data_dir,['*' expDate '_all_session_lfp_results.mat']));
 for bat_k = 1:length(lfpFnames)
+    % load the relevant data
     current_lfp_power = load(fullfile(lfpFnames(bat_k).folder,lfpFnames(bat_k).name),'lfpPower','winSize','lfp_power_timestamps','batNum','n_artifact_times'); 
+    % remove windows that had too many artifacts detected
     current_lfp_power.lfpData = get_artifact_removed_full_session_LFP(current_lfp_power,max_artifact_fract,freq_k); 
     current_lfp_power.batNum = str2double(current_lfp_power.batNum); 
     all_session_lfp_power(bat_k) = current_lfp_power; %#ok<AGROW>
@@ -1111,7 +1132,3 @@ lfpPower_artifact_removed = lfpData.lfpPower(:,:,freq_k);
 lfpPower_artifact_removed(artifact_chunks) = NaN;
 
 end
-
-
-
-
