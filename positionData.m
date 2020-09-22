@@ -618,6 +618,45 @@ classdef positionData < ephysData
             used_exp_dates = pd.expstr2datetime(used_exp_date_strs);
             used_exp_dates = setdiff(used_exp_dates,exclDates);
             [~,t_idx] = inRange(bat_pair_corr_info.time,tLim);
+        
+        function [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate)
+            lfpData = load_all_session_lfp_power(pd,expDate);
+            [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate);
+        end
+        
+        function [pairDist, pairCorr, video_t_rs, lfp_fs] = get_aligned_corr_dist(pd,expDate,varargin)
+            
+            pnames = {'lfp_fill_win','corr_smooth_scale'};
+            dflts  = {10,100};
+            [lfp_fill_win, corr_smooth_scale] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate);
+            
+            used_bat_nums = lfpResample.keys;
+            used_bat_nums = [used_bat_nums{:}];
+            % first enumerate all possible bat pairs 
+            batPairs = get_bat_pairs(pd,'expDate',expDate,'used_bat_nums',used_bat_nums);
+            
+            % get the distance between each of those pairs
+            nPairs = size(batPairs,1);
+            [pairDist, pairCorr] = deal(cell(1,nPairs));
+            
+            for bat_pair_k = 1:nPairs
+                pairDist{bat_pair_k} = vecnorm(posResample(batPairs(bat_pair_k,1)) - posResample(batPairs(bat_pair_k,2)),2,2);
+                
+                current_lfp_data = cellfun(@(bNum) nanmedian(lfpResample(bNum),1)',num2cell(batPairs(bat_pair_k,:)),'un',0);
+                current_lfp_data = fillmissing([current_lfp_data{:}],'movmean',lfp_fill_win);
+                pairCorr{bat_pair_k} = movCorr(current_lfp_data(:,1),current_lfp_data(:,2),corr_smooth_scale,0);
+            end
+            
+            % convert the array of bat pairs into a list of strings of the
+            % form '[batNum1]-[batNum2]' to use as keys into the Map of
+            % pairwise distances
+            bat_pair_keys = pd.get_pair_keys(batPairs);
+            pairDist = containers.Map(bat_pair_keys,pairDist);
+            pairCorr = containers.Map(bat_pair_keys,pairCorr);
+            
+        end
 
             expDist = containers.Map('KeyType','char','ValueType','any');
             bat_call_corr = containers.Map('KeyType','char','ValueType','any');
@@ -947,6 +986,75 @@ function [xSub,idx] = inRange(x,bounds)
 bounds = sort(bounds);
 idx = x>bounds(1) & x<= bounds(2);
 xSub = x(idx);
+end
+
+function all_session_lfp_power = load_all_session_lfp_power(pd,expDate,varargin)
+
+pnames = {'max_artifact_fract','freq_k'};
+dflts  = {0.01,2,100};
+[max_artifact_fract, freq_k] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+
+lfp_data_dir = fullfile(pd.baseDirs{1},'lfp_data');
+if isdatetime(expDate)
+    expDate = datestr(expDate,'yyyymmdd');
+end
+
+lfpFnames = dir(fullfile(lfp_data_dir,['*' expDate '_all_session_lfp_results.mat']));
+for bat_k = 1:length(lfpFnames)
+    current_lfp_power = load(fullfile(lfpFnames(bat_k).folder,lfpFnames(bat_k).name),'lfpPower','winSize','lfp_power_timestamps','batNum','n_artifact_times'); 
+    current_lfp_power.lfpData = get_artifact_removed_full_session_LFP(current_lfp_power,max_artifact_fract,freq_k); 
+    current_lfp_power.batNum = str2double(current_lfp_power.batNum); 
+    all_session_lfp_power(bat_k) = current_lfp_power; %#ok<AGROW>
+end
+
+end
+
+function [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate)
+
+roundingFactor = 100;
+
+lfp_fs = 1/median(diff(lfpData(1).lfp_power_timestamps));
+lfp_fs = round(roundingFactor*lfp_fs)/roundingFactor;
+
+[N,D] = rat(lfp_fs/pd.video_fs);
+
+tRange = [max(cellfun(@min,{lfpData.lfp_power_timestamps})) min(cellfun(@max,{lfpData.lfp_power_timestamps}))];
+exp_date_str = pd.datetime2expstr(expDate);
+video_t = 1e-3*pd.posTS(exp_date_str);
+[video_t,t_range_idx] = inRange(video_t,tRange);
+video_t_rs = resample(video_t,N,D,0);
+
+pos = pd.get_pos(exp_date_str);
+batNums = pos.keys;
+posResample = containers.Map('KeyType','double','ValueType','any');
+
+for bNum = batNums
+    current_bat_pos = pos(bNum{1});
+    posResample(bNum{1}) = resample(current_bat_pos(t_range_idx,:),N,D);
+end
+
+nBat = length(lfpData);
+lfpResample = containers.Map('KeyType','double','ValueType','any');
+for bat_k = 1:nBat
+    current_lfp_power = lfpData(bat_k).lfpData;
+    nChannel = size(current_lfp_power,1);
+    current_lfp_resample = nan(nChannel,length(video_t_rs));
+    for ch_k = 1:nChannel
+        current_lfp_resample(ch_k,:) = interp1(lfpData(bat_k).lfp_power_timestamps,current_lfp_power(ch_k,:),video_t_rs,'linear');
+    end
+    lfpResample(lfpData(bat_k).batNum) = current_lfp_resample;
+end
+
+video_t_rs = 1e3*video_t_rs;
+
+end
+
+function lfpPower_artifact_removed = get_artifact_removed_full_session_LFP(lfpData,max_artifact_frac,freq_k)
+
+artifact_chunks = lfpData.n_artifact_times/lfpData.winSize > max_artifact_frac;
+lfpPower_artifact_removed = lfpData.lfpPower(:,:,freq_k);
+lfpPower_artifact_removed(artifact_chunks) = NaN;
+
 end
 
 
