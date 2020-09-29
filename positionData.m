@@ -299,9 +299,17 @@ classdef positionData < ephysData
             % which contain the given bat's position and which bat made the
             % call, respectively
             
-            pnames = {'inter_call_int','expDates'};
-            dflts  = {[],[]};
-            [inter_call_int,expDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'inter_call_int','expDates','call_offset_range','avgPos'};
+            dflts  = {-Inf,[],[],true};
+            [inter_call_int,expDates,call_offset_range,avgPos] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            % set up +/- offset in ms
+            if isempty(call_offset_range)
+                call_offset_range = pd.callOffset.*[-1 1];
+            end
+            
+            call_sample_offset = round(call_offset_range*pd.video_fs);
+            call_sample_offset = call_sample_offset(1):call_sample_offset(2)-1;
             
             % get expDates in datetime and corresponding date strings
             if isempty(expDates)
@@ -322,30 +330,29 @@ classdef positionData < ephysData
                 callIDs = cData('expDay',expDates(exp_k)).callID';
                 
                 % if provided, limit to calls separated by minimum inter
-                % call interval
-                if ~isempty(inter_call_int)
-                    callIdx = [Inf; diff(callTimes)] > inter_call_int;
-                    callTimes = callTimes(callIdx);
-                    calling_bat_nums = calling_bat_nums(callIdx);
-                    callIDs = callIDs(callIdx);
-                end
+                % call interval (default is -Inf)
+                callIdx = [Inf; diff(callTimes)] > inter_call_int;
+                callTimes = callTimes(callIdx);
+                calling_bat_nums = calling_bat_nums(callIdx);
+                callIDs = callIDs(callIdx);
                 
                 % get the frame timestamps for this expDate
                 t = pd.get_time(expDates(exp_k));
-                % set up +/- offset in ms
-                call_time_offset = 1e3.*pd.callOffset.*[-1 1];
                 
                 % here we'll iterate over all calls and then over bats
                 nCall = length(callTimes);
                 nBat = length(pd.all_bat_nums);
                 call_pos_idx = cell(1,nCall);
-                current_call_pos = repmat({nan(nCall,2)},1,nBat);
+                current_call_pos = cell(1,nBat);
                 
                 % for each call get the corresponding index into the
                 % position data over which to average
                 for call_k = 1:nCall
-                    current_call_time = callTimes(call_k) + call_time_offset;
-                    [~,call_pos_idx{call_k}] = inRange(t, current_call_time);
+                    [~,current_call_sample] = min(abs(t - callTimes(call_k)));
+                    call_pos_idx{call_k} = current_call_sample + call_sample_offset;
+                    if any(call_pos_idx{call_k} < 0 | call_pos_idx{call_k} > length(t))
+                       call_pos_idx{call_k} = []; 
+                    end
                 end
                 
                 % for each bat, get its average position for all calls and
@@ -354,7 +361,12 @@ classdef positionData < ephysData
                 % call (we might want to save also the unique callID here)
                 for bat_k = 1:nBat
                     current_bat_pos = pos(pd.all_bat_nums(bat_k));
-                    current_bat_pos = cellfun(@(idx) nanmean(current_bat_pos(idx,:)),call_pos_idx,'un',0);
+                    if avgPos
+                        current_bat_pos = cellfun(@(idx) nanmean(current_bat_pos(idx,:)),call_pos_idx,'un',0);
+                    else
+                        current_bat_pos = cellfun(@(idx) current_bat_pos(idx,:),call_pos_idx,'un',0);
+                    end
+                    [current_bat_pos{cellfun(@isempty,current_bat_pos)}] = deal(nan(length(call_sample_offset),2));
                     current_call_pos{bat_k} = struct('pos',current_bat_pos,'caller',calling_bat_nums,'callID',num2cell(callIDs));
                 end
                 % create map of structs indexed by batNums
@@ -378,9 +390,9 @@ classdef positionData < ephysData
             % bat pair string. Values are structs with fields 'dist' and
             % 'caller' which contain the given bat pair's distance and
             % which bat made the call, respectively
-            pnames = {'inter_call_int','expDates'};
-            dflts  = {[],[]};
-            [inter_call_int,expDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+             pnames = {'inter_call_int','expDates','call_offset_range','avgPos'};
+            dflts  = {-Inf,[],[],true};
+            [inter_call_int,expDates,call_offset_range,avgPos] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             % get expDates in datetime and corresponding date strings
             if isempty(expDates)
                 exp_date_strs = pd.batPos.keys;
@@ -390,7 +402,7 @@ classdef positionData < ephysData
             end
             
             % get bat positions around calls across expDates
-            call_bat_pos = get_call_pos(pd,cData,'expDate',expDates,'inter_call_int',inter_call_int);
+            call_bat_pos = get_call_pos(pd,cData,'expDate',expDates,'inter_call_int',inter_call_int,'call_offset_range',call_offset_range,'avgPos',avgPos);
             
             nExp = length(expDates);
             callDist = cell(1,nExp);
@@ -415,11 +427,11 @@ classdef positionData < ephysData
                     
                     calling_bat_nums = cellfun(@(bat) {bat.caller},current_call_bat_pos,'un',0);
                     % get the array of positions for both bat in this pair
-                    current_call_bat_pos = cellfun(@(bat) vertcat(bat.pos),current_call_bat_pos,'un',0);
+                    current_call_bat_pos = cellfun(@(bat) cat(3,bat.pos),current_call_bat_pos,'un',0);
                     % calculate the distance between this pair of bats
-                    current_call_dist = vecnorm(current_call_bat_pos{1} - current_call_bat_pos{2},2,2)';
+                    current_call_dist = squeeze(vecnorm(current_call_bat_pos{1} - current_call_bat_pos{2},2,2));
                     % save as a struct with fields 'dist' and 'caller'
-                    bat_call_dist{bat_pair_k} = struct('dist',num2cell(current_call_dist),'caller',calling_bat_nums{1},'callID',num2cell(callIDs{1}));
+                    bat_call_dist{bat_pair_k} = struct('dist',num2cell(current_call_dist,1),'caller',calling_bat_nums{1},'callID',num2cell(callIDs{1}));
                 end
                 % create map of structs indexed by bat pair strings
                 bat_pair_keys = pd.get_pair_keys(batPairs);
@@ -429,13 +441,22 @@ classdef positionData < ephysData
             callDist = containers.Map(exp_date_strs,callDist);
         end
         function callMap = collect_by_calls(~,call_data_map)
-            %% reorganizes a call-distance map from indexing by expDates to
+            %% reorganizes a call-distance/position map from indexing by expDates to
             % indexing by callIDs
             % Inputs:
-            % call_data_map: output of pd.get_call_dist
+            % call_data_map: output of pd.get_call_dist or pd.get_call_pos
             % Outputs:
             % callMap: nested map indexed by callID and batPair which
-            % contains pairwise bat distances
+            % contains pairwise bat distances/positions
+            
+            % first determine the variable name of the data we're working
+            % with ('pos' or 'dist')
+            firstMap = call_data_map.values;
+            firstMap = firstMap{1};
+            firstMap = firstMap.values;
+            firstMap = firstMap{1};
+            varName = setdiff(fieldnames(firstMap),{'caller','callID'});
+            varName = varName{1};
             
             callMap = containers.Map('KeyType','double','ValueType','any');
             % iterate over expDates
@@ -450,10 +471,10 @@ classdef positionData < ephysData
                     for call_id = callIDs
                         if isKey(callMap,call_id) % if we've already added this callID for a different batPair
                             bat_call_map = callMap(call_id); % get this call's distance map
-                            bat_call_map(batKey{1}) = batData(call_k).dist; % get this bat pair's distance for this call
+                            bat_call_map(batKey{1}) = batData(call_k).(varName); % get this bat pair's distance for this call
                             callMap(call_id) = bat_call_map; % replace this call's distance map with updated map
                         else % if we haven't already, initialize a map for this call to be indexed by batPair
-                            callMap(call_id) = containers.Map(batKey{1},batData(call_k).dist);
+                            callMap(call_id) = containers.Map(batKey{1},batData(call_k).(varName));
                         end
                         call_k = call_k + 1;
                     end
@@ -769,6 +790,32 @@ classdef positionData < ephysData
             batCats = [batCats{:}];
             all_exp_dates = [all_exp_dates{:}];
             predTable = table(distValues',corrValues',batCats',all_exp_dates','VariableNames',{'pos','corr','bat','date'});
+            
+        end
+        function [bat_pair_corr_map, included_call_map] = bat_pair_corr_info_2_map(bpci,pd)
+            
+            f_k = 3;
+            nCalls = length(bpci.all_included_call_nums);
+            bat_pair_keys = pd.get_pair_keys(str2double(bpci.all_bat_pairs));
+            bat_pair_corr_map = containers.Map('KeyType','double','ValueType','any');
+            included_call_map = containers.Map('KeyType','double','ValueType','any');
+            
+            for call_k = 1:nCalls
+                batCorr = squeeze(bpci.bat_pair_corr(call_k,:,f_k,:));
+                current_call_IDs = bpci.all_included_call_nums{call_k};
+                current_call_map = containers.Map('KeyType','char','ValueType','any');
+                
+                bat_pair_k = 1;
+                for bPair = bat_pair_keys'
+                    current_call_map(bPair{1}) = batCorr(bat_pair_k,:);
+                    bat_pair_k = bat_pair_k + 1;
+                end
+                
+                for callID = current_call_IDs
+                    bat_pair_corr_map(callID) = current_call_map;
+                    included_call_map(callID) = current_call_IDs;
+                end
+            end
             
         end
         
