@@ -429,9 +429,13 @@ classdef positionData < ephysData
                     % get the array of positions for both bat in this pair
                     current_call_bat_pos = cellfun(@(bat) cat(3,bat.pos),current_call_bat_pos,'un',0);
                     % calculate the distance between this pair of bats
-                    current_call_dist = squeeze(vecnorm(current_call_bat_pos{1} - current_call_bat_pos{2},2,2));
+                    current_call_dist = vecnorm(current_call_bat_pos{1} - current_call_bat_pos{2},2,2);
+                    current_call_dist = squeeze(num2cell(current_call_dist,1));
+                    if size(current_call_dist,1) ~= 1
+                        current_call_dist = reshape(current_call_dist,1,[]);
+                    end
                     % save as a struct with fields 'dist' and 'caller'
-                    bat_call_dist{bat_pair_k} = struct('dist',num2cell(current_call_dist,1),'caller',calling_bat_nums{1},'callID',num2cell(callIDs{1}));
+                    bat_call_dist{bat_pair_k} = struct('dist',current_call_dist,'caller',calling_bat_nums{1},'callID',num2cell(callIDs{1}));
                 end
                 % create map of structs indexed by bat pair strings
                 bat_pair_keys = pd.get_pair_keys(batPairs);
@@ -718,7 +722,7 @@ classdef positionData < ephysData
                 nPair = length(current_bat_pairs);
                 % get the average pairwise distance on this day for each
                 % bat pair
-                expDist(current_date_key) = cellfun(@(key) nanmean(current_exp_dist(key)),current_bat_pairs);
+                expDist(current_date_key) = cellfun(@(key) nanmedian(current_exp_dist(key)),current_bat_pairs);
                 
                 current_bat_call_corr = nan(1,nPair);
                 bat_pair_k = 1;
