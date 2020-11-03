@@ -20,6 +20,7 @@ classdef positionData < ephysData
         sessionType = 'social' % only 'social' sessions work for now
         callOffset = 2 % time offset (in s) +/- around calls over which to average bat position
         pixel2cm = 0.25 % factor to convert pixels to cm
+        exclBats = 11682
         
         clusterThresh
         
@@ -369,7 +370,7 @@ classdef positionData < ephysData
                     [~,current_call_sample] = min(abs(t - callTimes(call_k)));
                     call_pos_idx{call_k} = current_call_sample + call_sample_offset;
                     if any(call_pos_idx{call_k} < 0 | call_pos_idx{call_k} > length(t))
-                       call_pos_idx{call_k} = []; 
+                        call_pos_idx{call_k} = [];
                     end
                 end
                 
@@ -408,7 +409,7 @@ classdef positionData < ephysData
             % bat pair string. Values are structs with fields 'dist' and
             % 'caller' which contain the given bat pair's distance and
             % which bat made the call, respectively
-             pnames = {'inter_call_int','expDates','call_offset_range','avgPos'};
+            pnames = {'inter_call_int','expDates','call_offset_range','avgPos'};
             dflts  = {-Inf,[],[],true};
             [inter_call_int,expDates,call_offset_range,avgPos] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             % get expDates in datetime and corresponding date strings
@@ -505,8 +506,8 @@ classdef positionData < ephysData
         end
         
         % functions to analyze distance alone
-        function [dist_matrix_corr, mantel_pval] = compare_dist_matrices(pd,varargin)
-            %% gets correlation values between distance matrices across days and corresponding Mantel Test p-values 
+        function [dist_matrix_corr, mantel_pval, exp_dist_dates] = compare_dist_matrices(pd,varargin)
+            %% gets correlation values between distance matrices across days and corresponding Mantel Test p-values
             % Inputs:
             % nRep: number of permutations to perform for p-values
             % exclDates: dates to exclude (NOTE: this analysis requires
@@ -516,19 +517,25 @@ classdef positionData < ephysData
             % distance matrix and the average distance matrix across all
             % other dates
             % mantel_pval: corresponding p-values for those correlation
-            pnames = {'nRep','exclDates'};
-            dflts  = {1e4,'08032020'};
-            [nRep,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'nRep','exclDates','dType'};
+            dflts  = {1e4,'08032020','dist'};
+            [nRep,exclDates,dType] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             exp_date_strs = pd.batPos.keys;
             exp_date_strs = setdiff(exp_date_strs,exclDates);
-            expDist = cellfun(@(expDay) posData.get_pairwise_dist(expDay),exp_date_strs,'un',0);
+            expDist = cellfun(@(expDay) pd.get_pairwise_dist(expDay),exp_date_strs,'un',0);
             
             assert(all(cellfun(@(x) all(strcmp(x.keys,expDist{1}.keys)),expDist)))
             
-            expDist = cellfun(@(dist) squareform(cellfun(@nanmean,dist.values)),expDist,'un',0);
-            [dist_matrix_corr, mantel_pval]= cellfun(@(m,k) bramila_mantel(m,nanmedian(cat(3,expDist{setdiff(1:length(expDist),k)}),3),nRep,'pearson'),expDist,num2cell(1:length(expDist)));
+            switch dType
+                case 'dist'
+                    D = cellfun(@(dist) squareform(cellfun(@nanmean,dist.values)),expDist,'un',0);
+                case 'dwell'
+                    D = cellfun(@(dist) squareform(cellfun(@(d) sum(d<pd.clusterThresh)/sum(~isnan(d)),dist.values)),expDist,'un',0);
+            end
+            [dist_matrix_corr, mantel_pval]= cellfun(@(m,k) bramila_mantel(m,nanmedian(cat(3,D{setdiff(1:length(D),k)}),3),nRep,'pearson'),D,num2cell(1:length(D)));
+            exp_dist_dates = cellfun(@(x) datetime(x,'InputFormat','MMddyyyy'),exp_date_strs);
         end
-        function clusterThresh = calculate_cluster_thresh(pd,varargin)
+        function [clusterThresh, gmmodel, xpdf ] = calculate_cluster_thresh(pd,varargin)
             pnames = {'sessionSelection','exclDates'};
             dflts  = {'social',datetime(2020,8,3)};
             [sessionSelection,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
@@ -564,16 +571,16 @@ classdef positionData < ephysData
             % Inputs:
             % cData: callData object
             % bat_pair_corr_info: output of 'calculate_all_cross_brain_lfp_corr'
-            % which contains the instantaneous inter-brain correlation 
+            % which contains the instantaneous inter-brain correlation
             % between bats around calls.
-            % call_pair_type: Specifies  which type of inter-brain 
-            % correlation to look at. Either 'l2l' (listener-to-listener) 
-            % or 'c2l' (caller-to-listener). 
+            % call_pair_type: Specifies  which type of inter-brain
+            % correlation to look at. Either 'l2l' (listener-to-listener)
+            % or 'c2l' (caller-to-listener).
             % inter_call_int: sets which calls to look at by
             % inter-call interval
             % tLim: time limits relative to call onset over which to
             % average inter-brain correlation
-            % Ouputs: 
+            % Ouputs:
             % predTable: a table that can input into 'fitlm' to test the
             % relationship between distance and interbrain correlation.
             % call_dist_and_corr: a structure containing maps indexed by
@@ -588,7 +595,7 @@ classdef positionData < ephysData
             call_dist_by_calls = pd.collect_by_calls(callDist);
             
             % convert the bat_pair_corr_info struct into a map indexed by
-            % callID. This also returns a map of all the callIDs included 
+            % callID. This also returns a map of all the callIDs included
             % in each call bout that weren't used explicitly because their
             % inter_call_interval was too short
             [bat_pair_corr_map, included_call_map] = bat_pair_corr_info_2_map(bat_pair_corr_info,pd);
@@ -691,7 +698,6 @@ classdef positionData < ephysData
             % session
             % sessionSelection: Which part of the social session to look
             % at: "all", "food", or "social"
-            % excl_bat_nums: which bats to exclude
             % exclDates: which expDates to exclude
             % included_call_type: for each bat pair, which types of calls
             % to average over. Can be "all" "calling" or "listening"
@@ -707,9 +713,9 @@ classdef positionData < ephysData
             % predTable: a table that can input into 'fitlm' to test the
             % relationship between distance and interbrain correlation.
             
-            pnames = {'sessionSelection','excl_bat_nums','exclDates','included_call_type','tLim','minCalls','calls_in_cluster','all_exp_dist','dwell_clust_thresh'};
-            dflts  = {'social','11682',datetime(2020,8,3),'all',[-0.3 0.3],10,false,[],pd.clusterThresh};
-            [sessionSelection,excl_bat_nums,exclDates,included_call_type,tLim,minCalls,calls_in_cluster,all_exp_dist,dwell_clust_thresh] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'sessionSelection','exclDates','included_call_type','tLim','minCalls','calls_in_cluster','all_exp_dist','dwell_clust_thresh'};
+            dflts  = {'social',datetime(2020,8,3),'all',[-0.3 0.3],10,false,[],pd.clusterThresh};
+            [sessionSelection,exclDates,included_call_type,tLim,minCalls,calls_in_cluster,all_exp_dist,dwell_clust_thresh] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             [bat_pair_corr_map, included_call_map] = bat_pair_corr_info_2_map(bat_pair_corr_info,pd);
             
@@ -730,7 +736,7 @@ classdef positionData < ephysData
             % doesn't change (if that's not right, then the variable
             % batCats won't be right either)
             bat_pair_keys = keys(bat_pair_corr_map(all_call_IDs(1)));
-            bat_pair_keys = bat_pair_keys(~contains(bat_pair_keys,excl_bat_nums));
+            bat_pair_keys = bat_pair_keys(~contains(bat_pair_keys,num2str(pd.exclBats)));
             
             % get the list of expDates to iterate over
             used_exp_date_strs = pd.batPos.keys;
@@ -747,7 +753,7 @@ classdef positionData < ephysData
                 if isempty(all_exp_dist)
                     current_exp_dist = pd.get_pairwise_dist(expDate,'sessionSelection',sessionSelection);
                 else
-                    current_exp_dist = all_exp_dist(pd.datetime2expstr(expDate)); 
+                    current_exp_dist = all_exp_dist(pd.datetime2expstr(expDate));
                 end
                 % get a (unordered) list of all callIDs made on this day
                 exp_call_IDs = cData('expDay',expDate).callID';
@@ -760,6 +766,7 @@ classdef positionData < ephysData
                 % present on this day
                 current_bat_pairs = intersect(bat_pair_keys,current_exp_dist.keys);
                 all_bat_pairs{exp_k} = current_bat_pairs;
+                
                 nPair = length(current_bat_pairs);
                 % get the average pairwise distance on this day for each
                 % bat pair
@@ -833,8 +840,8 @@ classdef positionData < ephysData
             % values will not be right if different groups of bats were
             % present across days)
             all_bat_pairs = [all_bat_pairs{:}];
-            
-            predTable = table(distValues',dwell_time_values',corrValues',all_bat_pairs',all_exp_dates','VariableNames',{'dist','dwell','corr','bat','date'});
+
+            predTable = table(distValues',dwell_time_values',corrValues',all_bat_pairs',all_exp_dates','VariableNames',{'dist','dwell','corr','batPair','date'});
             
         end
         function [bat_pair_corr_map, included_call_map] = bat_pair_corr_info_2_map(bpci,pd)
@@ -865,11 +872,11 @@ classdef positionData < ephysData
         end
         function predTable = get_call_dist_and_ID_acc(pd,bat_id_pred,varargin)
             
-            pnames = {'sessionSelection','excl_bat_nums','exclDates'};
-            dflts  = {'social','11682',datetime(2020,8,3)};
-            [sessionSelection,excl_bat_nums,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'sessionSelection','exclDates'};
+            dflts  = {'social',datetime(2020,8,3)};
+            [sessionSelection,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-%             p_vocal_id = rowfun(@(x,y) 1 - sum(x>y)/length(y),bat_id_pred,'InputVariables',{'acc','bootAcc'});
+%             p_vocal_id = rowfun(@(x,y) 1 - sum(x>[y{:}])/length([y{:}]),bat_id_pred,'InputVariables',{'acc','bootAcc'});
 %             p_vocal_id = p_vocal_id.Var1;
 %             sigIdx = p_vocal_id < 0.05;
             sigIdx = calculate_sig_id(bat_id_pred,6:8);
@@ -881,12 +888,9 @@ classdef positionData < ephysData
             expDist = cellfun(@(expDay) pd.get_pairwise_dist(expDay,'sessionSelection',sessionSelection),used_exp_date_strs,'un',0);
             expDist = containers.Map(used_exp_date_strs,expDist);
             
-            if ischar(excl_bat_nums)
-                excl_bat_nums = str2double(excl_bat_nums);
-            end
             nPred = size(bat_id_pred,1);
             [acc,dist,dwellTime] = deal(nan(nPred,1));
-            batPair = cell(nPred,1);
+            [batPair,bat,targetBat] = deal(cell(nPred,1));
             k = 1;
             for cell_k = 1:nPred
                 expDate = datetime(bat_id_pred.cellInfo{cell_k}(1:8),'InputFormat','yyyyMMdd');
@@ -895,26 +899,28 @@ classdef positionData < ephysData
                     batNum = str2double(bat_id_pred.batNum{cell_k});
                     target_bat_num = str2double(bat_id_pred.targetBNum{cell_k});
                     
-                    if any(ismember([batNum target_bat_num],excl_bat_nums))
-                       continue 
+                    if any(ismember([batNum target_bat_num],pd.exclBats))
+                        continue
                     end
                     
                     bat_pair_str = pd.get_pair_keys([batNum target_bat_num]);
                     
                     current_exp_dist = expDist(current_exp_day_str);
-
+                    
                     if isKey(current_exp_dist,bat_pair_str) %&& sigIdx(cell_k)
-                        acc(k) = bat_id_pred.acc(cell_k);
+                        acc(k) = bat_id_pred.acc(cell_k) - quantile(bat_id_pred.bootAcc{cell_k},0.95);
                         dist(k) = nanmedian(current_exp_dist(bat_pair_str{1}));
                         dwellTime(k) = sum(current_exp_dist(bat_pair_str{1}) < pd.clusterThresh)/sum(~isnan(current_exp_dist(bat_pair_str{1})));
                         batPair{k} = bat_pair_str{1};
+                        bat{k} = bat_id_pred.batNum{cell_k};
+                        targetBat{k} = bat_id_pred.targetBNum{cell_k};
                         k = k + 1;
                     end
                 end
             end
             nCell = k - 1;
-            predTable = table(dist(1:nCell),dwellTime(1:nCell),acc(1:nCell),batPair(1:nCell),...
-                'VariableNames',{'dist','dwell','acc','bat'});
+            predTable = table(dist(1:nCell),dwellTime(1:nCell),acc(1:nCell),batPair(1:nCell),bat(1:nCell),targetBat(1:nCell),...
+                'VariableNames',{'dist','dwell','acc','batPair','bat','targetBat'});
         end
         
         % functions to analyze full session lfp power and position/distance
@@ -960,11 +966,11 @@ classdef positionData < ephysData
         end
         function [all_pair_dist, all_pair_corr] = get_all_session_corr_dist(pd,varargin)
             
-            pnames = {'excl_bat_nums','corr_smooth_scale','exclDates'};
-            dflts  = {'11682',100,{'08052020','08032020'}};
-            [excl_bat_nums, corr_smooth_scale, exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'corr_smooth_scale','exclDates'};
+            dflts  = {100,{'08032020'}};
+            [corr_smooth_scale, exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-            batNums = str2double(setdiff(pd.batNums,excl_bat_nums));
+            batNums = str2double(setdiff(pd.batNums,pd.exclBats));
             batPairs = pd.get_bat_pairs('used_bat_nums',batNums);
             bat_pair_keys = pd.get_pair_keys(batPairs);
             
@@ -992,21 +998,25 @@ classdef positionData < ephysData
         end
         
         % functions to analyze food sharing session
-        function get_food_map(pd)
+        function foodMap = get_food_map(pd,varargin)
+            used_bat_nums = setdiff(pd.all_bat_nums,pd.exclBats);
+            used_bat_num_strs = cellfun(@num2str,num2cell(used_bat_nums),'un',false);
+            
             food_sharing_fname = fullfile(pd.baseDirs{1},'documents','Foodsharing.xlsx');
             sheetNames = sheetnames(food_sharing_fname);
             foodMap = containers.Map('KeyType','double','ValueType','any');
             for sheetName = sheetNames'
-                if ismember(sheetName,cellfun(@num2str,num2cell(posData.all_bat_nums),'un',false))
+                if ismember(sheetName,used_bat_num_strs)
                     foodMap(str2double(sheetName{1})) = readtable(food_sharing_fname,'UseExcel',true,'Sheet',sheetName{1});
                 end
             end
         end
-        function get_prod_scrounge_map(pd,foodMap)
-            batPairs = pd.get_bat_pairs('expDate','08052020');
+        function scroungeSpecificity = get_scrounger_map(pd,foodMap,varargin)
+            used_bat_nums = setdiff(pd.all_bat_nums,pd.exclBats);
+            batPairs = pd.get_bat_pairs('used_bat_nums',used_bat_nums);
             all_bat_pairs = vertcat(batPairs,fliplr(batPairs));
             bat_pair_keys = cellfun(@(batPair) num2str(batPair,'%d-%d'),num2cell(all_bat_pairs,2),'UniformOutput',false);
-            PSMap = containers.Map(bat_pair_keys,zeros(1,length(bat_pair_keys)));
+            scroungeSpecificity = containers.Map(bat_pair_keys,zeros(1,length(bat_pair_keys)));
             N = sum(cellfun(@(x) sum(~isnan(x.produce) | ~isnan(x.scrounge)),foodMap.values));
             for batPair = bat_pair_keys'
                 bat_pair_nums = strsplit(batPair{1},'-');
@@ -1021,9 +1031,72 @@ classdef positionData < ephysData
                 Psp = Ps_or_p*Pp;
                 mu = N*Psp;
                 sigma = mu*(1 - Psp);
-                PSMap(batPair{1}) = (sum(current_food_map.target == target_bat_num) - mu)/sigma;
+                scroungeSpecificity(batPair{1}) = (sum(current_food_map.target == target_bat_num) - mu)/sigma;
+            end
+        end
+        function scroungeMat = get_scrounger_mat(pd,scroungeMap)
+            batNums = setdiff(pd.all_bat_nums,pd.exclBats);
+            nBat = length(batNums);
+            scroungeMat = nan(nBat);
+            bat_k1 = 1;
+            for batNum1 = batNums
+                bat_k2 = 1;
+                for batNum2 = batNums
+                    if batNum1~=batNum2
+                        batKey = strjoin(cellfun(@num2str,{batNum1 batNum2},'un',0),'-');
+                        scroungeMat(bat_k1,bat_k2) = scroungeMap(batKey);
+                    end
+                    bat_k2 = bat_k2 + 1;
+                end
+                bat_k1 = bat_k1 + 1;
+            end
+        end
+        function [feedingPriorities,chistat,producerIndex,nProd,nScrounge,foodVictories] = get_feeding_stats(pd,foodMap)
+            foodStructs = foodMap.values;
+            exp_date_strs = cellfun(@(bat) num2cell(num2str(bat.date),2),foodStructs,'un',0);
+            all_exp_dates = unique(vertcat(exp_date_strs{:}))';
+            batNums = setdiff(cell2mat(foodMap.keys),pd.exclBats);
+            
+            nExp = length(all_exp_dates);
+            nBat = length(batNums);
+            
+            [feedingTime, nProd, nScrounge] = deal(nan(nBat,nExp));
+            bat_k = 1;
+            for batNum = batNums
+                foodStruct = foodMap(batNum);
+                exp_k = 1;
+                for expDate = all_exp_dates
+                    dateIdx = strcmp(num2cell(num2str(foodStruct.date),2),all_exp_dates{exp_k});
+                    prodIdx = ~isnan(foodStruct.produce);
+                    scroungeIdx = ~isnan(foodStruct.scrounge);
+                    if any(dateIdx & prodIdx)
+                        feedingTime(bat_k,exp_k) = min(foodStruct.time(dateIdx & prodIdx));
+                    end
+                    nProd(bat_k,exp_k) = sum(dateIdx & prodIdx);
+                    nScrounge(bat_k,exp_k) = sum(dateIdx & scroungeIdx);
+                    exp_k = exp_k + 1;
+                end
+                bat_k = bat_k + 1;
             end
             
+            foodVictories = zeros(nBat,nBat,nExp);
+            for exp_k = 1:nExp
+                for bat_k1 = 1:nBat
+                    for bat_k2 = 1:nBat
+                        if bat_k1 ~= bat_k2
+                            foodVictories(bat_k1,bat_k2,exp_k) = feedingTime(bat_k1,exp_k) < feedingTime(bat_k2,exp_k);
+                        end
+                    end
+                end
+            end
+            foodVictories = sum(foodVictories,3);
+            A = num2cell(1:nBat);
+            [feedingPriorities,chistat] = fOptiPt(foodVictories,A);
+            
+            feedingPriorities = containers.Map(batNums,feedingPriorities);
+            
+            producerIndex = (nansum(nProd,2) - nansum(nScrounge,2))./(nansum(nProd,2) + nansum(nScrounge,2));
+            producerIndex = containers.Map(batNums,producerIndex);
         end
     end
 end
@@ -1211,7 +1284,7 @@ sync_bat_num = num2str(pd.recLogs.(batStr)(dateIdx));
 end
 
 function foodTime = get_food_time(pd,expDate,varargin)
-%% gets the time of food delivery by looking in the eventlog file for a food related string 
+%% gets the time of food delivery by looking in the eventlog file for a food related string
 
 pnames = {'foodStr'};
 dflts  = {'banana'};
@@ -1221,7 +1294,7 @@ call_data_dir = fullfile(pd.baseDirs{1},'call_data');
 event_file_dir = fullfile(pd.baseDirs{1},'event_file_data');
 exp_date_str = datestr(expDate,'yyyymmdd');
 % get this day's recording logs and check which session came first, social
-% or vocal 
+% or vocal
 exp_rec_logs = pd.recLogs(pd.recLogs.Date == expDate & ~strcmp(pd.recLogs.Session,'playback'),:);
 first_session_type = exp_rec_logs.Session{1};
 
@@ -1260,7 +1333,7 @@ end
 
 function all_session_lfp_power = load_all_session_lfp_power(pd,expDate,varargin)
 %% loads the pre-calculated lfp power for all bats present on a given date
-% Inputs: 
+% Inputs:
 % expDate: which expDate to get lfp data for
 % max_artifacts_fract: maximum fraction of samples in a window in which lfp
 % power was calculated to use, any window over that will be set to NaN
@@ -1278,10 +1351,10 @@ end
 lfpFnames = dir(fullfile(lfp_data_dir,['*' expDate '_all_session_lfp_results.mat']));
 for bat_k = 1:length(lfpFnames)
     % load the relevant data
-    current_lfp_power = load(fullfile(lfpFnames(bat_k).folder,lfpFnames(bat_k).name),'lfpPower','winSize','lfp_power_timestamps','batNum','n_artifact_times'); 
+    current_lfp_power = load(fullfile(lfpFnames(bat_k).folder,lfpFnames(bat_k).name),'lfpPower','winSize','lfp_power_timestamps','batNum','n_artifact_times');
     % remove windows that had too many artifacts detected
-    current_lfp_power.lfpData = get_artifact_removed_full_session_LFP(current_lfp_power,max_artifact_fract,freq_k); 
-    current_lfp_power.batNum = str2double(current_lfp_power.batNum); 
+    current_lfp_power.lfpData = get_artifact_removed_full_session_LFP(current_lfp_power,max_artifact_fract,freq_k);
+    current_lfp_power.batNum = str2double(current_lfp_power.batNum);
     all_session_lfp_power(bat_k) = current_lfp_power; %#ok<AGROW>
 end
 
