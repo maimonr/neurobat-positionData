@@ -17,7 +17,7 @@ classdef positionData < ephysData
         gap_fill_window_s = 2 % how long (in s) to fill in gaps in LED tracking
         video_fs = 20 % sampling rate of video cameras
         all_bat_nums = [11636,11682,13688,14612,14654,14798,60064,71216,71335] % all bat numbers we'd like to keep track of
-        sessionType = 'social' % only 'social' sessions work for now
+        sessionType % which session (social or vocal) to analyze
         callOffset = 2 % time offset (in s) +/- around calls over which to average bat position
         pixel2cm = 0.25 % factor to convert pixels to cm
         exclBats = 11682
@@ -41,13 +41,14 @@ classdef positionData < ephysData
             % used_exp_dates: list of datetimes to limit analysis to
             % used_bat_nums: list of bat IDs to limit analysis to
             
-            pnames = {'used_exp_dates','used_bat_nums'};
-            dflts  = {[],[]};
-            [used_exp_dates,used_bat_nums] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'used_exp_dates','used_bat_nums','sessionType'};
+            dflts  = {[],[],'social'};
+            [used_exp_dates,used_bat_nums,current_session_type] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             pd = pd@ephysData('adult_social'); % base pd on ephysData to get basic experimental metadata
             pd.tracking_data_dir = fullfile(pd.baseDirs{1},'tracking_data');
             pd.video_data_dir = fullfile(pd.baseDirs{1},'video_data');
+            pd.sessionType = current_session_type;
             
             mov_window_samples = pd.gap_fill_window_s*pd.video_fs; % get number of frames over which to perform moving window cleaning of positions
             
@@ -81,7 +82,12 @@ classdef positionData < ephysData
                 % get 'frame_ts_info' file which contains timestamps for
                 % each video frame, if this file doesn't exist, skip this
                 % date
-                frame_ts_info_fname = fullfile(pd.video_data_dir,[exp_date_str '_color_frame_timestamps_info_social.mat']);
+                switch pd.sessionType
+                    case 'social'
+                        frame_ts_info_fname = fullfile(pd.video_data_dir,[exp_date_str '_color_frame_timestamps_info_social.mat']);
+                    case 'vocal'
+                        frame_ts_info_fname = fullfile(pd.video_data_dir,[exp_date_str '_color_frame_timestamps_info.mat']);
+                end
                 
                 if ~isfile(frame_ts_info_fname)
                     used_exp_idx(exp_k) = false;
@@ -89,7 +95,9 @@ classdef positionData < ephysData
                 end
                 
                 % get food session time
-                foodTimes(exp_k) = get_food_time(pd,expDates(exp_k));
+                if strcmp(pd.sessionType,'social')
+                    foodTimes(exp_k) = get_food_time(pd,expDates(exp_k));
+                end
                 
                 % load frame_ts_info and LEDtracks
                 s = load(frame_ts_info_fname);
@@ -114,7 +122,7 @@ classdef positionData < ephysData
                 % only use LED tracks that overlap with the timestamps
                 predCentroids = predCentroids(idx_tracks,:,:);
                 % filter, center, and fill gaps in LED tracks
-                predCentroids = clean_pred_centroids(predCentroids,'GapMethod','movmedian','movWindow',mov_window_samples);
+                predCentroids = clean_pred_centroids(predCentroids,'GapMethod','movmedian','movWindow',mov_window_samples,'sessionType',pd.sessionType);
                 
                 % impose the same order on the position matrix for each day
                 colorStrs = LEDTracks.color_pred_model.ClassificationSVM.ClassNames;
@@ -174,7 +182,7 @@ classdef positionData < ephysData
                             return
                         end
                         idx = t > fTime;
-                    case 'all'
+                    case {'all','vocal'}
                         idx = true(1,length(t));
                 end
                 pos = pos(idx,:);
@@ -231,6 +239,17 @@ classdef positionData < ephysData
             bat_pair_keys = pd.get_pair_keys(batPairs);
             pairDist = containers.Map(bat_pair_keys,pairDist);
             
+        end
+        function expDist = get_exp_dist(pd,varargin)
+            pnames = {'sessionSelection','exclDates'};
+            dflts  = {'social',datetime(2020,8,3)};
+            [sessionSelection,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            excl_date_strs = pd.datetime2expstr(exclDates);
+            used_exp_date_strs = setdiff(pd.batPos.keys,excl_date_strs);
+            
+            expDist = cellfun(@(expDay) pd.get_pairwise_dist(expDay,'sessionSelection',sessionSelection),used_exp_date_strs,'un',0);
+            expDist = containers.Map(used_exp_date_strs,expDist);
         end
         function batPairs = get_bat_pairs(pd,varargin)
             % utility function to enumerate all bat pairs
@@ -876,20 +895,19 @@ classdef positionData < ephysData
             dflts  = {'social',datetime(2020,8,3)};
             [sessionSelection,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-%             p_vocal_id = rowfun(@(x,y) 1 - sum(x>[y{:}])/length([y{:}]),bat_id_pred,'InputVariables',{'acc','bootAcc'});
-%             p_vocal_id = p_vocal_id.Var1;
-%             sigIdx = p_vocal_id < 0.05;
-            sigIdx = calculate_sig_id(bat_id_pred,6:8);
+            p_vocal_id = rowfun(@(x,y) 1 - sum(x>[y{:}])/length([y{:}]),bat_id_pred,'InputVariables',{'acc','bootAcc'});
+            p_vocal_id = p_vocal_id.Var1;
+            sigIdx = p_vocal_id < 0.05;
             
-            excl_date_strs = pd.datetime2expstr(exclDates);
-            used_exp_date_strs = setdiff(pd.batPos.keys,excl_date_strs);
-            used_exp_dates = pd.expstr2datetime(used_exp_date_strs);
+            expDist = get_exp_dist(pd,'exclDates',exclDates,'sessionSelection',sessionSelection);
+            used_exp_dates = pd.expstr2datetime(expDist.keys);
             
-            expDist = cellfun(@(expDay) pd.get_pairwise_dist(expDay,'sessionSelection',sessionSelection),used_exp_date_strs,'un',0);
-            expDist = containers.Map(used_exp_date_strs,expDist);
+            foodMap = pd.get_food_map;
+            [~,~,~,~,~,~,foodVictories] =...
+                pd.get_feeding_stats(foodMap);
             
             nPred = size(bat_id_pred,1);
-            [acc,dist,dwellTime] = deal(nan(nPred,1));
+            [acc,dist,dwellTime,foodPrior] = deal(nan(nPred,1));
             [batPair,bat,targetBat] = deal(cell(nPred,1));
             k = 1;
             for cell_k = 1:nPred
@@ -907,20 +925,70 @@ classdef positionData < ephysData
                     
                     current_exp_dist = expDist(current_exp_day_str);
                     
-                    if isKey(current_exp_dist,bat_pair_str) %&& sigIdx(cell_k)
-                        acc(k) = bat_id_pred.acc(cell_k) - quantile(bat_id_pred.bootAcc{cell_k},0.95);
+                    if isKey(current_exp_dist,bat_pair_str) && sigIdx(cell_k)
+                        acc(k) = bat_id_pred.acc(cell_k);
                         dist(k) = nanmedian(current_exp_dist(bat_pair_str{1}));
-                        dwellTime(k) = sum(current_exp_dist(bat_pair_str{1}) < pd.clusterThresh)/sum(~isnan(current_exp_dist(bat_pair_str{1})));
-                        batPair{k} = bat_pair_str{1};
+                        dwellTime(k) = sum(current_exp_dist(bat_pair_str{1}) < pd.clusterThresh)/sum(~isnan(current_exp_dist(bat_pair_str{1}))); 
                         bat{k} = bat_id_pred.batNum{cell_k};
                         targetBat{k} = bat_id_pred.targetBNum{cell_k};
+                        batPair{k} = strjoin([bat(k),targetBat(k)],'-');
+                        if isKey(foodVictories,current_exp_day_str)
+                            current_food_victories = foodVictories(current_exp_day_str);
+                            if isKey(current_food_victories,batPair{k})
+                                foodPrior(k) = current_food_victories(batPair{k});
+                            end
+                        end
                         k = k + 1;
                     end
                 end
             end
             nCell = k - 1;
-            predTable = table(dist(1:nCell),dwellTime(1:nCell),acc(1:nCell),batPair(1:nCell),bat(1:nCell),targetBat(1:nCell),...
-                'VariableNames',{'dist','dwell','acc','batPair','bat','targetBat'});
+            predTable = table(dist(1:nCell),dwellTime(1:nCell),acc(1:nCell),foodPrior(1:nCell),batPair(1:nCell),bat(1:nCell),targetBat(1:nCell),...
+                'VariableNames',{'dist','dwell','acc','food','batPair','bat','targetBat'});
+        end
+        function predTable = get_dist_and_corr_by_call(pd,cData,bat_pair_corr_info)
+            
+            exclDates = datetime(2020,8,3);
+            predTable_session = get_session_call_dist_and_corr(pd,cData,bat_pair_corr_info,'exclDates',exclDates);
+            freq_k = 3;
+            t_idx = 9:11;
+            avgCorr = nanmean(bat_pair_corr_info.bat_pair_corr(:,:,freq_k,t_idx),4);
+            corr_bat_pairs = cellfun(@(x,y) strjoin(sort({x,y}),'-'),...
+                bat_pair_corr_info.all_bat_pairs(:,1),bat_pair_corr_info.all_bat_pairs(:,2),'un',0);
+            nCall = size(avgCorr,1);
+            n_bat_pair = size(avgCorr,2);
+            [corrDwell,corrDist] = deal(nan(nCall,n_bat_pair));
+            for call_k = 1:nCall
+                dateIdx = predTable_session.date == bat_pair_corr_info.expDates(call_k);
+                for bat_pair_k = 1:n_bat_pair
+                    bat_pair_idx = strcmp(predTable_session.batPair,corr_bat_pairs(bat_pair_k));
+                    dIdx = dateIdx & bat_pair_idx;
+                    if any(dIdx)
+                        corrDwell(call_k,bat_pair_k) = predTable_session.dwell(dIdx);
+                        corrDist(call_k,bat_pair_k) = predTable_session.dist(dIdx);
+                    end
+                end
+            end
+            
+            batNums = cellfun(@(callNum) cData('callID',callNum(1)).batNum,...
+                bat_pair_corr_info.all_included_call_nums,'un',0);
+            batNums = [batNums{:}];
+            
+            all_bat_pairs = repmat(corr_bat_pairs',nCall,1);
+            call_bat_nums = repmat(batNums',1,n_bat_pair);
+            
+            listening_bat_idx = cellfun(@(b) any(ismember(b,pd.batNums)),batNums);
+            multi_bat_idx = cellfun(@iscell,batNums);
+            unID_bat_idx = cellfun(@(x) any(contains(x,'unidentified')),batNums);
+            idx = ~isnan(avgCorr) & ~isnan(corrDist) & ~repmat(listening_bat_idx',1,n_bat_pair) &...
+                ~repmat(multi_bat_idx',1,n_bat_pair) & ~repmat(unID_bat_idx',1,n_bat_pair);
+            predCorr = avgCorr(idx);
+            predDist = corrDist(idx);
+            predDwell = corrDwell(idx);
+            pred_bat_pair = all_bat_pairs(idx);
+            pred_call_bat_nums = call_bat_nums(idx);
+            predTable = table(pred_bat_pair,pred_call_bat_nums,predCorr,predDist,predDwell,...
+                'VariableNames',{'batPair','callBat','corr','dist','dwell'});
         end
         
         % functions to analyze full session lfp power and position/distance
@@ -970,7 +1038,7 @@ classdef positionData < ephysData
             dflts  = {100,{'08032020'}};
             [corr_smooth_scale, exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-            batNums = str2double(setdiff(pd.batNums,pd.exclBats));
+            batNums = setdiff(str2double(pd.batNums),pd.exclBats);
             batPairs = pd.get_bat_pairs('used_bat_nums',batNums);
             bat_pair_keys = pd.get_pair_keys(batPairs);
             
@@ -1051,7 +1119,7 @@ classdef positionData < ephysData
                 bat_k1 = bat_k1 + 1;
             end
         end
-        function [feedingPriorities,chistat,producerIndex,nProd,nScrounge,foodVictories] = get_feeding_stats(pd,foodMap)
+        function [feedingPriorities,chistat,producerIndex,nProd,nScrounge,foodVictories,foodVictory_map] = get_feeding_stats(pd,foodMap)
             foodStructs = foodMap.values;
             exp_date_strs = cellfun(@(bat) num2cell(num2str(bat.date),2),foodStructs,'un',0);
             all_exp_dates = unique(vertcat(exp_date_strs{:}))';
@@ -1070,7 +1138,9 @@ classdef positionData < ephysData
                     prodIdx = ~isnan(foodStruct.produce);
                     scroungeIdx = ~isnan(foodStruct.scrounge);
                     if any(dateIdx & prodIdx)
-                        feedingTime(bat_k,exp_k) = min(foodStruct.time(dateIdx & prodIdx));
+                        minClip = min(foodStruct.clip(dateIdx & prodIdx));
+                        clipIdx = foodStruct.clip == minClip;
+                        feedingTime(bat_k,exp_k) = min(foodStruct.time(dateIdx & prodIdx & clipIdx));
                     end
                     nProd(bat_k,exp_k) = sum(dateIdx & prodIdx);
                     nScrounge(bat_k,exp_k) = sum(dateIdx & scroungeIdx);
@@ -1080,23 +1150,30 @@ classdef positionData < ephysData
             end
             
             foodVictories = zeros(nBat,nBat,nExp);
+            foodVictory_map = containers.Map('KeyType','char','ValueType','any');
+            all_exp_dates = cellfun(@(d) datetime(d,'InputFormat','Mddyyyy'),all_exp_dates);
             for exp_k = 1:nExp
+                exp_date_str = pd.datetime2expstr(all_exp_dates(exp_k));
+                current_food_victory_map = containers.Map('KeyType','char','ValueType','double');
                 for bat_k1 = 1:nBat
                     for bat_k2 = 1:nBat
                         if bat_k1 ~= bat_k2
                             foodVictories(bat_k1,bat_k2,exp_k) = feedingTime(bat_k1,exp_k) < feedingTime(bat_k2,exp_k);
+                            bat_pair_key = strjoin(cellfun(@num2str,num2cell(batNums([bat_k1,bat_k2])),'un',0),'-');
+                            current_food_victory_map(bat_pair_key) = foodVictories(bat_k1,bat_k2,exp_k);
                         end
                     end
                 end
+                foodVictory_map(exp_date_str) = current_food_victory_map;
             end
-            foodVictories = sum(foodVictories,3);
             A = num2cell(1:nBat);
-            [feedingPriorities,chistat] = fOptiPt(foodVictories,A);
+            [feedingPriorities,chistat] = fOptiPt(sum(foodVictories,3),A);
             
             feedingPriorities = containers.Map(batNums,feedingPriorities);
             
             producerIndex = (nansum(nProd,2) - nansum(nScrounge,2))./(nansum(nProd,2) + nansum(nScrounge,2));
             producerIndex = containers.Map(batNums,producerIndex);
+            
         end
     end
 end
@@ -1177,22 +1254,30 @@ function pred_centroids_clean = clean_pred_centroids(pred_centroids, varargin)
 % * the variable should be named locs in the workspace, it is a variable with 3D. the 1D(rows) is number of frames for the whole day
 % the 2D(colomns) is number of colors(e.g 8), 3D is x,y values for each frame. e.g for dimentions: 144314x8x2.
 
-pnames = {'filtRank','movWindow','fillGaps','GapMethod','remove_out_of_bounds'};
-dflts  = {5,5,true,'linear_with_th',true};
-[filtRank, movWindow, fillGaps, GapMethod, remove_out_of_bounds] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+pnames = {'filtRank','movWindow','fillGaps','GapMethod','remove_out_of_bounds','sessionType'};
+dflts  = {5,5,true,'linear_with_th',true,'social'};
+[filtRank, movWindow, fillGaps, GapMethod, remove_out_of_bounds,sessionType] = internal.stats.parseArgs(pnames,dflts,varargin{:});
 
 nColor = size(pred_centroids,3);
 pred_centroids_clean = nan(size(pred_centroids));
 
 %% (2) here we rotate so we can limit x,y to max limits, med_filter the data, fill gaps.
-ROI_rot = load('ROI_rot.mat'); % this struc contains the rotation matrix, limts of x and y and center of cage values
+switch sessionType
+    case 'social'
+        ROI_rot = load('ROI_rot.mat'); % this struc contains the rotation matrix, limts of x and y and center of cage values
+    case 'vocal'
+        ROI_rot = load('LEDtrackingParams_vocal.mat');
+        ROI_rot.xlims = ROI_rot.ROIIdx(3:4);
+        ROI_rot.ylims = ROI_rot.ROIIdx(1:2);
+        ROI_rot.c = [0 0];
+        ROI_rot.R = [1 0; 0 1];
+end
 for color_k = 1:nColor % we run this analysis bat by bat (e.i color by color)
     
     % "rotate" pixels about a center point
     XYrot = ((pred_centroids(:,:,color_k) - ROI_rot.c)*ROI_rot.R') + ROI_rot.c;
     
     % enforce x,y min/max limits for stepping out of cage-top bounds
-    
     
     if ~remove_out_of_bounds
         x = XYrot(:,1);
@@ -1376,7 +1461,7 @@ if ~isnan(fTime)
             session_t_idx = video_t < fTime;
         case 'food'
             session_t_idx = video_t > fTime;
-        case 'all'
+        case {'all','vocal'}
             session_t_idx = true(size(video_t));
     end
 else
