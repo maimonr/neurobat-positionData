@@ -156,7 +156,7 @@ classdef positionData < ephysData
             % returns the array of positions for that bat on that date
             
             pnames = {'sessionSelection'};
-            dflts  = {'social'};
+            dflts  = {'exclFood'};
             [sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             if isdatetime(expDate)
@@ -171,7 +171,7 @@ classdef positionData < ephysData
                 fTime = pd.foodTime(expDate);
                 t = pd.posTS(expDate);
                 switch sessionSelection
-                    case 'social'
+                    case 'exclFood'
                         if isnan(fTime)
                             return
                         end
@@ -182,7 +182,7 @@ classdef positionData < ephysData
                             return
                         end
                         idx = t > fTime;
-                    case {'all','vocal'}
+                    case 'all'
                         idx = true(1,length(t));
                 end
                 pos = pos(idx,:);
@@ -204,7 +204,7 @@ classdef positionData < ephysData
             % expDate: datetime or date string
             
             pnames = {'sessionSelection'};
-            dflts  = {'social'};
+            dflts  = {'exclFood'};
             [sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             dist = vecnorm((get_pos(pd,expDate,batNums(1),'sessionSelection',sessionSelection)...
@@ -220,7 +220,7 @@ classdef positionData < ephysData
             % distance between that pair.
             
             pnames = {'used_bat_nums','sessionSelection'};
-            dflts  = {[],'social'};
+            dflts  = {[],'exclFood'};
             [used_bat_nums,sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             % first enumerate all possible bat pairs
@@ -242,7 +242,7 @@ classdef positionData < ephysData
         end
         function expDist = get_exp_dist(pd,varargin)
             pnames = {'sessionSelection','exclDates'};
-            dflts  = {'social',datetime(2020,8,3)};
+            dflts  = {'exclFood',datetime(2020,8,3)};
             [sessionSelection,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             excl_date_strs = pd.datetime2expstr(exclDates);
@@ -536,15 +536,11 @@ classdef positionData < ephysData
             % distance matrix and the average distance matrix across all
             % other dates
             % mantel_pval: corresponding p-values for those correlation
-            pnames = {'nRep','exclDates','dType'};
-            dflts  = {1e4,'08032020','dist'};
-            [nRep,exclDates,dType] = internal.stats.parseArgs(pnames,dflts,varargin{:});
-            exp_date_strs = pd.batPos.keys;
-            exp_date_strs = setdiff(exp_date_strs,exclDates);
-            expDist = cellfun(@(expDay) pd.get_pairwise_dist(expDay),exp_date_strs,'un',0);
-            
-            assert(all(cellfun(@(x) all(strcmp(x.keys,expDist{1}.keys)),expDist)))
-            
+            pnames = {'nRep','exclDates','dType','sessionSelection'};
+            dflts  = {1e4,datetime(2020,8,3),'dist','exclFood'};
+            [nRep,exclDates,dType,sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            expDist = get_exp_dist(pd,'exclDates',exclDates,'sessionSelection',sessionSelection);
+            assert(all(cellfun(@(x) all(strcmp(x.keys,expDist{1}.keys)),expDist.values)))
             switch dType
                 case 'dist'
                     D = cellfun(@(dist) squareform(cellfun(@nanmean,dist.values)),expDist,'un',0);
@@ -552,18 +548,15 @@ classdef positionData < ephysData
                     D = cellfun(@(dist) squareform(cellfun(@(d) sum(d<pd.clusterThresh)/sum(~isnan(d)),dist.values)),expDist,'un',0);
             end
             [dist_matrix_corr, mantel_pval]= cellfun(@(m,k) bramila_mantel(m,nanmedian(cat(3,D{setdiff(1:length(D),k)}),3),nRep,'pearson'),D,num2cell(1:length(D)));
-            exp_dist_dates = cellfun(@(x) datetime(x,'InputFormat','MMddyyyy'),exp_date_strs);
+            exp_dist_dates = pd.datetime2expstr(expDist.keys);
         end
         function [clusterThresh, gmmodel, xpdf ] = calculate_cluster_thresh(pd,varargin)
             pnames = {'sessionSelection','exclDates'};
-            dflts  = {'social',datetime(2020,8,3)};
+            dflts  = {'exclFood',datetime(2020,8,3)};
             [sessionSelection,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-            excl_date_strs = pd.datetime2expstr(exclDates);
-            used_exp_date_strs = setdiff(pd.batPos.keys,excl_date_strs);
+            expDist = get_exp_dist(pd,'exclDates',exclDates,'sessionSelection',sessionSelection);
             
-            expDist = cellfun(@(expDay) pd.get_pairwise_dist(expDay,'sessionSelection',sessionSelection),used_exp_date_strs,'un',0);
-            expDist = containers.Map(used_exp_date_strs,expDist);
             allDist = cellfun(@(expDist) cell2mat(expDist.values),expDist.values,'un',0);
             allDist = cellfun(@(x) x(:),allDist,'un',0);
             
@@ -573,6 +566,32 @@ classdef positionData < ephysData
             gmmodel = fitgmdist(xpdf,2);
             [~,idx] = min(gmmodel.mu);
             clusterThresh = 10^quantile(xpdf,gmmodel.ComponentProportion(idx));
+        end
+        function avgD_by_bat = get_avgD_by_bat(pd,expDist,varargin)
+            
+            pnames = {'dType'};
+            dflts  = {'dwell'};
+            [dType] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            batNums = setdiff(pd.all_bat_nums,pd.exclBats);
+            batPairs = pd.get_bat_pairs('used_bat_nums',batNums);
+            bat_pair_keys = pd.get_pair_keys(batPairs);
+            assert(all(cellfun(@(x) all(strcmp(x.keys,bat_pair_keys')),expDist.values)))
+            
+            switch dType
+                case 'dwell'
+                    avgD = cellfun(@(expD) cellfun(@(d) sum(d<pd.clusterThresh)/sum(~isnan(d)),expD.values),expDist.values,'un',0);
+                case 'dist'
+                    avgD = cellfun(@(expD) cellfun(@nanmedian,expD.values),expDist.values,'un',0);
+            end
+            avgD = mean(vertcat(avgD{:}));
+            batNums = cellfun(@(x) strsplit(x,'-'),bat_pair_keys,'un',0);
+            batNums = unique([batNums{:}]);
+            avgD_by_bat = nan(1,length(batNums));
+            for bat_k = 1:length(batNums)
+                avgD_by_bat(bat_k) = mean(avgD(contains(bat_pair_keys,batNums{bat_k})));
+            end
+            avgD_by_bat = containers.Map(batNums,avgD_by_bat);
         end
         
         % functions to analyze call distance and neural activity
@@ -733,7 +752,7 @@ classdef positionData < ephysData
             % relationship between distance and interbrain correlation.
             
             pnames = {'sessionSelection','exclDates','included_call_type','tLim','minCalls','calls_in_cluster','all_exp_dist','dwell_clust_thresh'};
-            dflts  = {'social',datetime(2020,8,3),'all',[-0.3 0.3],10,false,[],pd.clusterThresh};
+            dflts  = {'exclFood',datetime(2020,8,3),'all',[-0.3 0.3],10,false,[],pd.clusterThresh};
             [sessionSelection,exclDates,included_call_type,tLim,minCalls,calls_in_cluster,all_exp_dist,dwell_clust_thresh] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             [bat_pair_corr_map, included_call_map] = bat_pair_corr_info_2_map(bat_pair_corr_info,pd);
@@ -892,7 +911,7 @@ classdef positionData < ephysData
         function predTable = get_call_dist_and_ID_acc(pd,bat_id_pred,varargin)
             
             pnames = {'sessionSelection','exclDates'};
-            dflts  = {'social',datetime(2020,8,3)};
+            dflts  = {'exclFood',datetime(2020,8,3)};
             [sessionSelection,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             p_vocal_id = rowfun(@(x,y) 1 - sum(x>[y{:}])/length([y{:}]),bat_id_pred,'InputVariables',{'acc','bootAcc'});
@@ -946,10 +965,15 @@ classdef positionData < ephysData
             predTable = table(dist(1:nCell),dwellTime(1:nCell),acc(1:nCell),foodPrior(1:nCell),batPair(1:nCell),bat(1:nCell),targetBat(1:nCell),...
                 'VariableNames',{'dist','dwell','acc','food','batPair','bat','targetBat'});
         end
-        function predTable = get_dist_and_corr_by_call(pd,cData,bat_pair_corr_info)
+        function predTable = get_dist_and_corr_by_call(pd,cData,bat_pair_corr_info,varargin)
             
-            exclDates = datetime(2020,8,3);
+            pnames = {'exclDates','selectCalls','sessionSelection'};
+            dflts  = {datetime(2020,8,3),'listening','exclFood'};
+            [exclDates,selectCalls,sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
             predTable_session = get_session_call_dist_and_corr(pd,cData,bat_pair_corr_info,'exclDates',exclDates);
+            expDist = get_exp_dist(pd,'exclDates',exclDates,'sessionSelection',sessionSelection);
+            avg_dwell_by_bat = get_avgD_by_bat(pd,expDist,'dType','dwell');
             freq_k = 3;
             t_idx = 9:11;
             avgCorr = nanmean(bat_pair_corr_info.bat_pair_corr(:,:,freq_k,t_idx),4);
@@ -967,34 +991,46 @@ classdef positionData < ephysData
                         corrDwell(call_k,bat_pair_k) = predTable_session.dwell(dIdx);
                         corrDist(call_k,bat_pair_k) = predTable_session.dist(dIdx);
                     end
-                end
+                end 
             end
             
-            batNums = cellfun(@(callNum) cData('callID',callNum(1)).batNum,...
+            calling_bat_nums = cellfun(@(callNum) cData('callID',callNum(1)).batNum,...
                 bat_pair_corr_info.all_included_call_nums,'un',0);
-            batNums = [batNums{:}];
-            
+            calling_bat_nums = [calling_bat_nums{:}];
+           
+            switch selectCalls
+                case 'listening'
+                    select_call_idx = ~cellfun(@(b) any(ismember(b,pd.batNums)),calling_bat_nums);
+                case 'calling'
+                    select_call_idx = cellfun(@(b) any(ismember(b,pd.batNums)),calling_bat_nums);
+                case 'all'
+                    select_call_idx = true(1,nCall);
+            end
+            multi_bat_idx = cellfun(@iscell,calling_bat_nums);
+            unID_bat_idx = cellfun(@(x) any(contains(x,'unidentified')),calling_bat_nums);
+
             all_bat_pairs = repmat(corr_bat_pairs',nCall,1);
-            call_bat_nums = repmat(batNums',1,n_bat_pair);
-            
-            listening_bat_idx = cellfun(@(b) any(ismember(b,pd.batNums)),batNums);
-            multi_bat_idx = cellfun(@iscell,batNums);
-            unID_bat_idx = cellfun(@(x) any(contains(x,'unidentified')),batNums);
-            idx = ~isnan(avgCorr) & ~isnan(corrDist) & ~repmat(listening_bat_idx',1,n_bat_pair) &...
+            call_bat_nums = repmat(calling_bat_nums',1,n_bat_pair);
+            all_exp_dates = repmat(bat_pair_corr_info.expDates,1,n_bat_pair);
+
+            idx = ~isnan(avgCorr) & ~isnan(corrDist) & repmat(select_call_idx',1,n_bat_pair) &...
                 ~repmat(multi_bat_idx',1,n_bat_pair) & ~repmat(unID_bat_idx',1,n_bat_pair);
             predCorr = avgCorr(idx);
             predDist = corrDist(idx);
             predDwell = corrDwell(idx);
             pred_bat_pair = all_bat_pairs(idx);
             pred_call_bat_nums = call_bat_nums(idx);
-            predTable = table(pred_bat_pair,pred_call_bat_nums,predCorr,predDist,predDwell,...
-                'VariableNames',{'batPair','callBat','corr','dist','dwell'});
+            pred_exp_dates = all_exp_dates(idx);
+            pred_call_bat_dwell = cellfun(@(bNum) avg_dwell_by_bat(bNum),pred_call_bat_nums);
+            
+            predTable = table(pred_bat_pair,pred_call_bat_nums,predCorr,predDist,predDwell,pred_call_bat_dwell,pred_exp_dates,...
+                'VariableNames',{'batPair','callBat','corr','dist','dwell','call_bat_dwell','date'});
         end
         
         % functions to analyze full session lfp power and position/distance
         function [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate,varargin)
             pnames = {'sessionSelection'};
-            dflts  = {'social'};
+            dflts  = {'exclFood'};
             [sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             lfpData = load_all_session_lfp_power(pd,expDate);
             [lfpResample, posResample, video_t_rs, lfp_fs] = align_lfp_pos(pd,lfpData,expDate,'sessionSelection',sessionSelection);
@@ -1002,7 +1038,7 @@ classdef positionData < ephysData
         function [pairDist, pairCorr, video_t_rs, lfp_fs] = get_aligned_corr_dist(pd,expDate,varargin)
             
             pnames = {'lfp_fill_win','corr_smooth_scale','sessionSelection'};
-            dflts  = {10,100,'social'};
+            dflts  = {10,100,'exclFood'};
             [lfp_fill_win, corr_smooth_scale, sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             [lfpResample, posResample, video_t_rs, lfp_fs] = get_aligned_lfp_pos(pd,expDate,'sessionSelection',sessionSelection);
