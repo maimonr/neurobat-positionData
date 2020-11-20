@@ -997,23 +997,33 @@ classdef positionData < ephysData
             calling_bat_nums = cellfun(@(callNum) cData('callID',callNum(1)).batNum,...
                 bat_pair_corr_info.all_included_call_nums,'un',0);
             calling_bat_nums = [calling_bat_nums{:}];
+            
+            used_call_idx = ~(cellfun(@iscell,calling_bat_nums) | cellfun(@(x) any(strcmp(x,'unidentified')),calling_bat_nums));
+            calling_bat_nums = calling_bat_nums(used_call_idx);
+            avgCorr = avgCorr(used_call_idx,:);
+            corrDwell = corrDwell(used_call_idx,:);
+            corrDist = corrDist(used_call_idx,:);
+            call_exp_dates = bat_pair_corr_info.expDates(used_call_idx);
+            nCall = sum(used_call_idx);
            
+            all_bat_pairs = repmat(corr_bat_pairs',nCall,1);
+            all_calling_bats = repmat(calling_bat_nums',1,n_bat_pair);
+            calling_bat_idx = cellfun(@(bPair,callBat) contains(bPair,callBat),all_bat_pairs,all_calling_bats);
             switch selectCalls
                 case 'listening'
-                    select_call_idx = ~cellfun(@(b) any(ismember(b,pd.batNums)),calling_bat_nums);
+                    select_call_idx = ~calling_bat_idx;
                 case 'calling'
-                    select_call_idx = cellfun(@(b) any(ismember(b,pd.batNums)),calling_bat_nums);
+                    select_call_idx = calling_bat_idx;
                 case 'all'
-                    select_call_idx = true(1,nCall);
+                    select_call_idx = true(size(calling_bat_idx));
             end
             multi_bat_idx = cellfun(@iscell,calling_bat_nums);
             unID_bat_idx = cellfun(@(x) any(contains(x,'unidentified')),calling_bat_nums);
 
-            all_bat_pairs = repmat(corr_bat_pairs',nCall,1);
             call_bat_nums = repmat(calling_bat_nums',1,n_bat_pair);
-            all_exp_dates = repmat(bat_pair_corr_info.expDates,1,n_bat_pair);
+            all_exp_dates = repmat(call_exp_dates,1,n_bat_pair);
 
-            idx = ~isnan(avgCorr) & ~isnan(corrDist) & repmat(select_call_idx',1,n_bat_pair) &...
+            idx = ~isnan(avgCorr) & ~isnan(corrDist) & select_call_idx &...
                 ~repmat(multi_bat_idx',1,n_bat_pair) & ~repmat(unID_bat_idx',1,n_bat_pair);
             predCorr = avgCorr(idx);
             predDist = corrDist(idx);
