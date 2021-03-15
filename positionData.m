@@ -1,4 +1,4 @@
-classdef positionData < ephysData
+classdef positionData
     %% Class to perform and consolidate analysis relating to bat spatial position data
     % Initializing this class will collect all available tracking data and
     % organize it according to experiment date (expDate) and bat ID number
@@ -14,10 +14,12 @@ classdef positionData < ephysData
     % expDate, and the next level by batNum.
     %%
     properties
-        gap_fill_window_s = 2 % how long (in s) to fill in gaps in LED tracking
+        gap_fill_window_s = 1 % how long (in s) to fill in gaps in LED tracking
         video_fs = 20 % sampling rate of video cameras
         all_bat_nums = [11636,11682,13688,14612,14654,14798,60064,71216,71335] % all bat numbers we'd like to keep track of
         sessionType % which session (social or vocal) to analyze
+        expType % which experiment to analyze
+        groupStr % string indicating which group in an experiment to analyze
         callOffset = 2 % time offset (in s) +/- around calls over which to average bat position
         pixel2cm = 0.25 % factor to convert pixels to cm
         exclBats = 11682
@@ -31,6 +33,11 @@ classdef positionData < ephysData
         video_data_dir
         call_data_dir
         
+        serverStr = 'server1_home';
+        pathStr = 'users\Maimon_and_Boaz\';
+        remote_drive_letter
+        serverPath
+        recLogs
     end
     
     methods
@@ -41,23 +48,38 @@ classdef positionData < ephysData
             % used_exp_dates: list of datetimes to limit analysis to
             % used_bat_nums: list of bat IDs to limit analysis to
             
-            pnames = {'used_exp_dates','used_bat_nums','sessionType','calculate_cluster_thresh'};
-            dflts  = {[],[],'social',false};
-            [used_exp_dates,used_bat_nums,current_session_type,calculate_cluster_thresh] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'used_exp_dates','used_bat_nums','sessionType','calculate_cluster_thresh','centroid_assignment_type','expType','groupStr','foodSess'};
+            dflts  = {[],[],'social',false,'modelPosterior','adult_social',[],false};
+            [used_exp_dates,used_bat_nums,current_session_type,calculate_cluster_thresh,centroid_assignment_type,expType,groupStr,foodSess] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-            pd = pd@ephysData('adult_social'); % base pd on ephysData to get basic experimental metadata
-            pd.tracking_data_dir = fullfile(pd.baseDirs{1},'tracking_data');
-            pd.video_data_dir = fullfile(pd.baseDirs{1},'video_data');
+            pd.expType = expType;
+            pd.groupStr = groupStr;
             pd.sessionType = current_session_type;
+            
+            pd.remote_drive_letter = get_remote_drive_letter(pd);
+            pd.serverPath = get_server_path(pd);
+            
+            pd.tracking_data_dir = fullfile(pd.serverPath,'tracking_data');
+            pd.video_data_dir = fullfile(pd.serverPath,'video_data');
+            
+            try
+                pd.recLogs = readtable(fullfile(pd.serverPath,'documents','recording_logs.csv'));
+            catch
+                pd.recLogs = get_rec_logs;
+            end
             
             mov_window_samples = pd.gap_fill_window_s*pd.video_fs; % get number of frames over which to perform moving window cleaning of positions
             
             % get a list of all LEDtracking results and the corresponding
             % expDates
-            led_track_fnames = dir(fullfile(pd.tracking_data_dir,['LEDtracking_pred_' pd.sessionType '*.mat']));
+            led_track_fnames = dir(fullfile(pd.tracking_data_dir,['LEDtracking_pred_' pd.sessionType pd.groupStr '*.mat']));
             fnameSplit = arrayfun(@(x) strsplit(x.name,'_'),led_track_fnames,'un',0);
             exp_date_strs = cellfun(@(x) x{end}(1:end-4),fnameSplit,'un',0);
             expDates = pd.expstr2datetime(exp_date_strs);
+            
+            if isempty(used_exp_dates) && ~isempty(groupStr)
+                used_exp_dates = unique(posData.recLogs.Date(strcmp(posData.recLogs.Group,groupStr)));
+            end
             
             if ~isempty(used_exp_dates) % if supplied, limit expDates to those supplied
                 [~,used_date_idx] = ismember(expDates,used_exp_dates);
@@ -84,18 +106,20 @@ classdef positionData < ephysData
                 % date
                 switch pd.sessionType
                     case 'social'
-                        frame_ts_info_fname = fullfile(pd.video_data_dir,[exp_date_str '_color_frame_timestamps_info_social.mat']);
+                        sessStr = '_social';
                     case 'vocal'
-                        frame_ts_info_fname = fullfile(pd.video_data_dir,[exp_date_str '_color_frame_timestamps_info.mat']);
+                        sessStr = '';
                 end
                 
+                frame_ts_info_fname = fullfile(pd.video_data_dir,[exp_date_str '_color_frame_timestamps_info' sessStr pd.groupStr '.mat']);
+
                 if ~isfile(frame_ts_info_fname)
                     used_exp_idx(exp_k) = false;
                     continue
                 end
                 
                 % get food session time
-                if strcmp(pd.sessionType,'social')
+                if strcmp(pd.sessionType,'social') && foodSess
                     foodTimes(exp_k) = get_food_time(pd,expDates(exp_k));
                 end
                 
@@ -118,14 +142,18 @@ classdef positionData < ephysData
                 
                 % get a matrix of XY positions for each frame and bat and
                 % deal with duplicate colors within frames
-                predCentroids = get_pred_centroids(LEDTracks);
+                predCentroids = get_pred_centroids(LEDTracks,'assignmentType',centroid_assignment_type);
                 % only use LED tracks that overlap with the timestamps
                 predCentroids = predCentroids(idx_tracks,:,:);
                 % filter, center, and fill gaps in LED tracks
                 predCentroids = clean_pred_centroids(predCentroids,'GapMethod','movmedian','movWindow',mov_window_samples,'sessionType',pd.sessionType);
                 
                 % impose the same order on the position matrix for each day
-                colorStrs = LEDTracks.color_pred_model.ClassificationSVM.ClassNames;
+                if isa(LEDTracks.color_pred_model,'ClassificationECOC')
+                    colorStrs = LEDTracks.color_pred_model.ClassNames;
+                else
+                    colorStrs = LEDTracks.color_pred_model.ClassificationSVM.ClassNames;
+                end
                 predCentroids = reorder_bat_pos(pd,predCentroids,colorStrs,expDates(exp_k));
                 % convert pixel values to cm
                 predCentroids = pd.pixel2cm*predCentroids;
@@ -317,9 +345,18 @@ classdef positionData < ephysData
             bat_idx = contains(pd.recLogs.Properties.VariableNames,'Bat_');
             color_idx = contains(pd.recLogs.Properties.VariableNames,'Color_');
             dateIdx = pd.recLogs.Date == expDate & strcmp(pd.recLogs.Session,pd.sessionType);
+            
+            if ~isempty(pd.groupStr)
+                dateIdx = dateIdx & strcmp(pd.recLogs.Group,pd.groupStr);
+            end
+            
             assert(sum(dateIdx) == 1)
             rec_logs_exp = pd.recLogs(dateIdx,:);
             bat_color_table = table(rec_logs_exp{1,bat_idx}',rec_logs_exp{1,color_idx}','VariableNames',{'batNum','color'});
+        end
+        function loc = pos2loc(pd,pos,ROI_rot)
+            loc = pos/pd.pixel2cm + [ROI_rot.xlims(1) ROI_rot.ylims(1)];
+            loc = ((loc - ROI_rot.c)/ROI_rot.R') + ROI_rot.c;
         end
         
         % functions to get call related position/distance data
@@ -587,7 +624,7 @@ classdef positionData < ephysData
                     avgD = cellfun(@(expD) cellfun(@nanmedian,expD.values),expDist.values,'un',0);
             end
             if sessionAvg
-                avgD = mean(vertcat(avgD{:}));
+                avgD = mean(vertcat(avgD{:}),1);
             else
                 avgD = vertcat(avgD{:});
             end
@@ -929,12 +966,8 @@ classdef positionData < ephysData
             expDist = get_exp_dist(pd,'exclDates',exclDates,'sessionSelection',sessionSelection);
             used_exp_dates = pd.expstr2datetime(expDist.keys);
             
-            foodMap = pd.get_food_map;
-            [~,~,~,~,~,~,foodVictories] =...
-                pd.get_feeding_stats(foodMap);
-            
             nPred = size(bat_id_pred,1);
-            [acc,dist,dwellTime,foodPrior,idSig] = deal(nan(nPred,1));
+            [acc,dist,dwellTime,idSig,id_cell_k] = deal(nan(nPred,1));
             [batPair,bat,targetBat,cellInfo] = deal(cell(nPred,1));
             expDates = datetime([],[],[]);
             k = 1;
@@ -960,22 +993,17 @@ classdef positionData < ephysData
                         idSig(k) = sigIdx(cell_k);
                         expDates(k) = expDate;
                         cellInfo{k} = bat_id_pred.cellInfo{cell_k};
+                        id_cell_k(k) = bat_id_pred.cell_k(cell_k);
                         bat{k} = bat_id_pred.batNum{cell_k};
                         targetBat{k} = bat_id_pred.targetBNum{cell_k};
                         batPair{k} = strjoin([bat(k),targetBat(k)],'-');
-                        if isKey(foodVictories,current_exp_day_str)
-                            current_food_victories = foodVictories(current_exp_day_str);
-                            if isKey(current_food_victories,batPair{k})
-                                foodPrior(k) = current_food_victories(batPair{k});
-                            end
-                        end
                         k = k + 1;
                     end
                 end
             end
             nCell = k - 1;
-            predTable = table(dist(1:nCell),dwellTime(1:nCell),acc(1:nCell),foodPrior(1:nCell),logical(idSig(1:nCell)),expDates(1:nCell)',cellInfo(1:nCell),batPair(1:nCell),bat(1:nCell),targetBat(1:nCell),...
-                'VariableNames',{'dist','dwell','acc','food','idSig','expDate','cellInfo','batPair','bat','targetBat'});
+            predTable = table(dist(1:nCell),dwellTime(1:nCell),acc(1:nCell),logical(idSig(1:nCell)),expDates(1:nCell)',cellInfo(1:nCell),id_cell_k(1:nCell),batPair(1:nCell),bat(1:nCell),targetBat(1:nCell),...
+                'VariableNames',{'dist','dwell','acc','idSig','expDate','cellInfo','cell_k','batPair','bat','targetBat'});
         end
         function predTable = get_dist_and_corr_by_call(pd,cData,bat_pair_corr_info,varargin)
             
@@ -1092,7 +1120,7 @@ classdef positionData < ephysData
             pairCorr = containers.Map(bat_pair_keys,pairCorr);
             
         end
-        function [all_pair_dist, all_pair_corr] = get_all_session_corr_dist(pd,varargin)
+        function [all_pair_dist, all_pair_corr, all_pair_t] = get_all_session_corr_dist(pd,varargin)
             
             pnames = {'corr_smooth_scale','exclDates'};
             dflts  = {100,{'08032020'}};
@@ -1104,21 +1132,24 @@ classdef positionData < ephysData
             
             all_pair_corr = containers.Map('KeyType','char','ValueType','any');
             all_pair_dist = containers.Map('KeyType','char','ValueType','any');
+            all_pair_t = containers.Map('KeyType','char','ValueType','any');
             
             expDates = pd.batPos.keys;
             expDates = setdiff(expDates,exclDates);
             expDates = pd.expstr2datetime(expDates);
             
             for expDate = expDates
-                [pairDist, pairCorr] = get_aligned_corr_dist(pd,expDate,'corr_smooth_scale',corr_smooth_scale);
+                [pairDist, pairCorr, video_t_rs] = get_aligned_corr_dist(pd,expDate,'corr_smooth_scale',corr_smooth_scale);
                 for batPair = bat_pair_keys'
                     if isKey(pairCorr,batPair{1})
                         if ~isKey(all_pair_corr,batPair{1})
                             all_pair_corr(batPair{1}) = pairCorr(batPair{1});
                             all_pair_dist(batPair{1}) = pairDist(batPair{1});
+                            all_pair_t(batPair{1}) = video_t_rs;
                         else
                             all_pair_corr(batPair{1}) = [all_pair_corr(batPair{1}); pairCorr(batPair{1})];
                             all_pair_dist(batPair{1}) = [all_pair_dist(batPair{1}); pairDist(batPair{1})];
+                            all_pair_t(batPair{1}) = [all_pair_t(batPair{1}); video_t_rs];
                         end
                     end
                 end
@@ -1130,7 +1161,7 @@ classdef positionData < ephysData
             used_bat_nums = setdiff(pd.all_bat_nums,pd.exclBats);
             used_bat_num_strs = cellfun(@num2str,num2cell(used_bat_nums),'un',false);
             
-            food_sharing_fname = fullfile(pd.baseDirs{1},'documents','Foodsharing.xlsx');
+            food_sharing_fname = fullfile(pd.serverPath,'documents','Foodsharing.xlsx');
             sheetNames = sheetnames(food_sharing_fname);
             foodMap = containers.Map('KeyType','double','ValueType','any');
             for sheetName = sheetNames'
@@ -1257,7 +1288,7 @@ end
 c2lDist(callID) = [c2lDist(callID) listening_bat_dist];
 end
 
-function pred_centroids = get_pred_centroids(LEDTracks)
+function pred_centroids = get_pred_centroids(LEDTracks,varargin)
 
 %% Inputs:
 % LEDTracks: results of LED tracking on an entire session (includes
@@ -1269,7 +1300,15 @@ function pred_centroids = get_pred_centroids(LEDTracks)
 % pred_centroids: a [num. of frames X 2 X num. of colors] matrix of
 % prediction centroid locations in X and Y for each frame and each color.
 
-color_names = LEDTracks.color_pred_model.ClassificationSVM.ClassNames;
+pnames = {'assignmentType','frameLookback'};
+dflts  = {'modelPosterior',5};
+[assignmentType,frameLookback] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+
+if isa(LEDTracks.color_pred_model,'ClassificationECOC')
+    color_names = LEDTracks.color_pred_model.ClassNames;
+else
+   color_names = LEDTracks.color_pred_model.ClassificationSVM.ClassNames; 
+end
 nColor = length(color_names);
 
 nFrames = length(LEDTracks.centroidLocs);
@@ -1278,14 +1317,26 @@ for frame_k = 1:nFrames
     for color_k = 1:nColor
         current_color_idx = strcmp(LEDTracks.predColors{frame_k},color_names{color_k}); % which color relative to the list used in the prediction model are we looking at?
         if sum(current_color_idx) > 1 % if the model predicted more than 1 of the same color, decide which to use
+            current_color_idx = find(current_color_idx);
             current_pred_posteriors = LEDTracks.predPosterior{frame_k}(current_color_idx,color_k);
-            if length(unique(current_pred_posteriors)) == 1 % if multiple locations have the same posterior (e.g. both at maximum posterior), we can't decide between them, discard
-                pred_centroids(frame_k,:,color_k) = NaN;
-                continue
-            else
-                [~,pred_posterior_idx] = max(current_pred_posteriors); % take the prediction with the higher posterior as the correct prediction
-                current_color_idx = find(current_color_idx);
-                current_color_idx = current_color_idx(pred_posterior_idx);
+            [~,pred_posterior_idx] = max(current_pred_posteriors); % take the prediction with the higher posterior as the correct prediction if using model posterior
+            switch assignmentType
+                case 'modelPosterior'
+                    if length(unique(current_pred_posteriors)) == 1 % if multiple locations have the same posterior (e.g. both at maximum posterior), we can't decide between them, discard
+                        pred_centroids(frame_k,:,color_k) = NaN;
+                        continue
+                    else
+                        current_color_idx = current_color_idx(pred_posterior_idx);
+                    end
+                case 'minDist'
+                    if frame_k < frameLookback || all(isnan(pred_centroids(frame_k-frameLookback:frame_k-1,:,color_k)),'all')% if first #frameLookback frames or no valid locations in the past #frameLookback frames, default to using model posterior
+                        current_color_idx = current_color_idx(pred_posterior_idx);
+                    else
+                        pastLoc = nanmedian(pred_centroids(frame_k-frameLookback-1:frame_k-1,:,color_k));
+                        currentDist = vecnorm(LEDTracks.centroidLocs{frame_k}(current_color_idx,:)' - pastLoc');
+                        [~,distIdx] = min(currentDist);
+                        current_color_idx = current_color_idx(distIdx);
+                    end
             end
         elseif sum(current_color_idx) == 0 % if this color isn't present in the predictin mark as NaN
             pred_centroids(frame_k,:,color_k) = NaN;
@@ -1435,8 +1486,8 @@ pnames = {'foodStr'};
 dflts  = {'banana'};
 [foodStr] = internal.stats.parseArgs(pnames,dflts,varargin{:});
 
-call_data_dir = fullfile(pd.baseDirs{1},'call_data');
-event_file_dir = fullfile(pd.baseDirs{1},'event_file_data');
+call_data_dir = fullfile(pd.serverPath,'call_data');
+event_file_dir = fullfile(pd.serverPath,'event_file_data');
 exp_date_str = datestr(expDate,'yyyymmdd');
 % get this day's recording logs and check which session came first, social
 % or vocal
@@ -1488,7 +1539,7 @@ pnames = {'max_artifact_fract','freq_k'};
 dflts  = {0.01,2};
 [max_artifact_fract, freq_k] = internal.stats.parseArgs(pnames,dflts,varargin{:});
 
-lfp_data_dir = fullfile(pd.baseDirs{1},'lfp_data');
+lfp_data_dir = fullfile(pd.serverPath,'lfp_data');
 if isdatetime(expDate)
     expDate = datestr(expDate,'yyyymmdd');
 end
@@ -1517,12 +1568,12 @@ video_t = 1e-3*pd.posTS(exp_date_str);
 
 if ~isnan(fTime)
     switch sessionSelection
-        case 'social'
+        case 'exclFood'
             session_t_idx = video_t < fTime;
         case 'food'
             session_t_idx = video_t > fTime;
-        case {'all','vocal'}
-            session_t_idx = true(size(video_t));
+        case 'all'
+            session_t_idx = true(1,length(video_t));
     end
 else
     session_t_idx = true(size(video_t));
@@ -1573,4 +1624,19 @@ artifact_chunks = lfpData.n_artifact_times/lfpData.winSize > max_artifact_frac;
 lfpPower_artifact_removed = lfpData.lfpPower(:,:,freq_k);
 lfpPower_artifact_removed(artifact_chunks) = NaN;
 
+end
+
+function remote_drive_letter = get_remote_drive_letter(pd)
+[~,caption_str]= dos('wmic logicaldisk get caption');
+[~,name_str]= dos('wmic logicaldisk get volumename');
+
+caption_str = strsplit(caption_str,'\n');
+name_str = strsplit(name_str,'\n');
+
+remote_drive_letter = caption_str{contains(name_str,pd.serverStr)};
+remote_drive_letter = deblank(remote_drive_letter);
+end
+
+function serverPath = get_server_path(pd)
+serverPath = fullfile(pd.remote_drive_letter,pd.pathStr,[pd.expType '_recording']);
 end
