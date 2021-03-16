@@ -68,8 +68,6 @@ classdef positionData
                 pd.recLogs = get_rec_logs;
             end
             
-            mov_window_samples = pd.gap_fill_window_s*pd.video_fs; % get number of frames over which to perform moving window cleaning of positions
-            
             % get a list of all LEDtracking results and the corresponding
             % expDates
             led_track_fnames = dir(fullfile(pd.tracking_data_dir,['LEDtracking_pred_' pd.sessionType pd.groupStr '*.mat']));
@@ -146,7 +144,7 @@ classdef positionData
                 % only use LED tracks that overlap with the timestamps
                 predCentroids = predCentroids(idx_tracks,:,:);
                 % filter, center, and fill gaps in LED tracks
-                predCentroids = clean_pred_centroids(predCentroids,'GapMethod','movmedian','movWindow',mov_window_samples,'sessionType',pd.sessionType);
+                predCentroids = clean_pred_centroids(pd,predCentroids,'GapMethod','movmedian');
                 
                 % impose the same order on the position matrix for each day
                 if isa(LEDTracks.color_pred_model,'ClassificationECOC')
@@ -1348,7 +1346,7 @@ end
 
 end
 
-function pred_centroids_clean = clean_pred_centroids(pred_centroids, varargin)
+function pred_centroids_clean = clean_pred_centroids(pd,pred_centroids, varargin)
 % First-pass analysis of location data taken from the raw results of the LED_tracking model for a given day.
 
 % first, we remove douplicaitons of color per frame (if you already have the variable locs saved you can load it and it will skip this first part*)
@@ -1365,17 +1363,24 @@ function pred_centroids_clean = clean_pred_centroids(pred_centroids, varargin)
 % * the variable should be named locs in the workspace, it is a variable with 3D. the 1D(rows) is number of frames for the whole day
 % the 2D(colomns) is number of colors(e.g 8), 3D is x,y values for each frame. e.g for dimentions: 144314x8x2.
 
-pnames = {'filtRank','movWindow','fillGaps','GapMethod','remove_out_of_bounds','sessionType'};
-dflts  = {5,5,true,'linear_with_th',true,'social'};
-[filtRank, movWindow, fillGaps, GapMethod, remove_out_of_bounds,sessionType] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+pnames = {'filtRank','fillGaps','GapMethod','remove_out_of_bounds'};
+dflts  = {5,5,true,'linear_with_th',true};
+[filtRank, fillGaps, GapMethod, remove_out_of_bounds] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+
+movWindow = pd.gap_fill_window_s*pd.video_fs; % get number of frames over which to perform moving window cleaning of positions
 
 nColor = size(pred_centroids,3);
 pred_centroids_clean = nan(size(pred_centroids));
 
 %% (2) here we rotate so we can limit x,y to max limits, med_filter the data, fill gaps.
-switch sessionType
+switch pd.sessionType
     case 'social'
-        ROI_rot = load('ROI_rot.mat'); % this struc contains the rotation matrix, limts of x and y and center of cage values
+        switch pd.expType
+            case 'adult_social'
+                ROI_rot = load('ROI_rot.mat'); % this struc contains the rotation matrix, limts of x and y and center of cage values
+            case 'sst'
+                ROI_rot = load('ROI_rot_sst.mat');
+        end
     case 'vocal'
         ROI_rot = load('LEDtrackingParams_vocal.mat');
         ROI_rot.xlims = ROI_rot.ROIIdx(3:4);
