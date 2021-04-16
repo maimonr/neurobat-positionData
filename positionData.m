@@ -76,7 +76,7 @@ classdef positionData
             expDates = pd.expstr2datetime(exp_date_strs);
             
             if isempty(used_exp_dates) && ~isempty(groupStr)
-                used_exp_dates = unique(posData.recLogs.Date(strcmp(posData.recLogs.Group,groupStr)));
+                used_exp_dates = unique(pd.recLogs.Date(strcmp(posData.recLogs.Group,groupStr)));
             end
             
             if ~isempty(used_exp_dates) % if supplied, limit expDates to those supplied
@@ -140,18 +140,14 @@ classdef positionData
                 
                 % get a matrix of XY positions for each frame and bat and
                 % deal with duplicate colors within frames
-                predCentroids = get_pred_centroids(LEDTracks,'assignmentType',centroid_assignment_type);
+                [~,colorStrs,ROI_rot] = get_rec_day_info(pd,expDates(exp_k));
+                predCentroids = get_pred_centroids(LEDTracks,colorStrs,'assignmentType',centroid_assignment_type);
                 % only use LED tracks that overlap with the timestamps
                 predCentroids = predCentroids(idx_tracks,:,:);
                 % filter, center, and fill gaps in LED tracks
-                predCentroids = clean_pred_centroids(pd,predCentroids,'GapMethod','movmedian');
+                predCentroids = clean_pred_centroids(pd,predCentroids,ROI_rot,'GapMethod','movmedian');
                 
                 % impose the same order on the position matrix for each day
-                if isa(LEDTracks.color_pred_model,'ClassificationECOC')
-                    colorStrs = LEDTracks.color_pred_model.ClassNames;
-                else
-                    colorStrs = LEDTracks.color_pred_model.ClassificationSVM.ClassNames;
-                end
                 predCentroids = reorder_bat_pos(pd,predCentroids,colorStrs,expDates(exp_k));
                 % convert pixel values to cm
                 predCentroids = pd.pixel2cm*predCentroids;
@@ -176,45 +172,67 @@ classdef positionData
             end
             
         end
-        function pos = get_pos(pd,expDate,batNum,varargin)
+        function pos = get_pos(pd,expDate,varargin)
             % utility function to get bat position(s) for a given expDate
             % and, optionally, for a given batNum. expDate can be either a
             % datetime or a date string. Without a batNum, this returns
             % the map of bat positions for the expDate, with a batNum this
             % returns the array of positions for that bat on that date
             
-            pnames = {'sessionSelection'};
-            dflts  = {'exclFood'};
-            [sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'sessionSelection','minCoverage','batNum'};
+            dflts  = {'exclFood',0.5,[]};
+            [sessionSelection,minCoverage,batNum] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             if isdatetime(expDate)
                 expDate = datestr(expDate,'mmddyyyy');
             end
-            pos = pd.batPos(expDate);
-            if nargin > 2
+            exp_bat_pos = pd.batPos(expDate);
+            
+            fTime = pd.foodTime(expDate);
+            t = pd.posTS(expDate);
+            idx = true(1,length(t));
+            switch sessionSelection
+                case 'exclFood'
+                    if ~isnan(fTime)
+                        idx = t < fTime;
+                    end
+                case 'food'
+                    if ~isnan(fTime)
+                        idx = t > fTime;
+                    else
+                        idx = false(1,length(t));
+                    end
+                case 'all'
+                    idx = true(1,length(t));
+            end
+            
+            if ~isempty(batNum)
                 if ~isnumeric(batNum)
                     batNum = str2double(batNum);
                 end
-                pos = pos(batNum);
-                fTime = pd.foodTime(expDate);
-                t = pd.posTS(expDate);
-                switch sessionSelection
-                    case 'exclFood'
-                        if isnan(fTime)
-                            return
-                        end
-                        idx = t < fTime;
-                    case 'food'
-                        if isnan(fTime)
-                            pos = [];
-                            return
-                        end
-                        idx = t > fTime;
-                    case 'all'
-                        idx = true(1,length(t));
-                end
-                pos = pos(idx,:);
+                batNums = batNum;
+            else
+                batNums = cell2mat(exp_bat_pos.keys);
             end
+            
+            pos = cell(1,length(batNums));
+            bat_k = 1;
+            for bNum = batNums
+                currentPos = exp_bat_pos(bNum);
+                currentPos = currentPos(idx,:);
+                coverage = sum(~isnan(currentPos(:,1)))/size(currentPos,1);
+                if coverage < minCoverage
+                   currentPos = nan(size(currentPos)); 
+                end
+                pos{bat_k} = currentPos;
+                bat_k = bat_k + 1;
+            end
+            pos = containers.Map(num2cell(batNums),pos);
+            
+            if ~isempty(batNum)
+               pos = pos(batNum); 
+            end
+            
         end
         function t = get_time(pd,expDate)
             % utlity function get timestamps for a given expDate. expDate
@@ -235,8 +253,8 @@ classdef positionData
             dflts  = {'exclFood'};
             [sessionSelection] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
-            dist = vecnorm((get_pos(pd,expDate,batNums(1),'sessionSelection',sessionSelection)...
-                - get_pos(pd,expDate,batNums(2),'sessionSelection',sessionSelection)),2,2);
+            dist = vecnorm((get_pos(pd,expDate,'batNum',batNums(1),'sessionSelection',sessionSelection)...
+                - get_pos(pd,expDate,'batNum',batNums(2),'sessionSelection',sessionSelection)),2,2);
         end
         function pairDist = get_pairwise_dist(pd,expDate,varargin)
             % gets pairwise distance between all pairs of bats.
@@ -279,6 +297,36 @@ classdef positionData
             expDist = cellfun(@(expDay) pd.get_pairwise_dist(expDay,'sessionSelection',sessionSelection),used_exp_date_strs,'un',0);
             expDist = containers.Map(used_exp_date_strs,expDist);
         end
+        
+        function m = get_motion(pd,expDate,varargin)
+            % gets the frame by frame movement of all bats on a given expDate
+            % Inputs:
+            % expDate: datetime or date string
+            
+            pnames = {'sessionSelection','smoothSpan','smoothType'};
+            dflts  = {'exclFood',50,'movmean'};
+            [sessionSelection,smoothSpan,smoothType] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            batNums = setdiff(pd.all_bat_nums,pd.exclBats);
+            
+             m = cellfun(@(bNum) vecnorm(diff(get_pos(pd,expDate,'batNum',bNum,'sessionSelection',sessionSelection)),2,2),...
+                 num2cell(batNums),'un',0);
+             m = cellfun(@(m) smoothdata([m(1); m],smoothType,smoothSpan),m,'un',0);
+             m = containers.Map(batNums,m);
+        end
+        function expMotion = get_exp_motion(pd,varargin)
+            pnames = {'sessionSelection','smoothSpan','smoothType','exclDates'};
+            dflts  = {'exclFood',50,'movmean',[]};
+            [sessionSelection,smoothSpan,smoothType,exclDates] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            
+            excl_date_strs = pd.datetime2expstr(exclDates);
+            used_exp_date_strs = setdiff(pd.batPos.keys,excl_date_strs);
+            
+            expMotion = cellfun(@(expDay) pd.get_motion(expDay,'sessionSelection',sessionSelection,...
+                'smoothSpan',smoothSpan,'smoothType',smoothType),used_exp_date_strs,'un',0);
+            expMotion = containers.Map(used_exp_date_strs,expMotion);
+        end
+        
         function batPairs = get_bat_pairs(pd,varargin)
             % utility function to enumerate all bat pairs
             % Inputs:
@@ -296,7 +344,7 @@ classdef positionData
             % if expDate is provided get a list of batNums used on this
             % date and limit bats to just those
             if ~isempty(expDate)
-                bat_color_table = get_bat_color_table(pd,expDate);
+                bat_color_table = get_rec_day_info(pd,expDate);
                 used_bat_nums = intersect(used_bat_nums,bat_color_table.batNum);
             end
             
@@ -334,7 +382,7 @@ classdef positionData
             end
             expDates = cellfun(@(dateStr) datetime(dateStr,'InputFormat','MMddyyyy'),exp_date_strs);
         end
-        function bat_color_table = get_bat_color_table(pd,expDate)
+        function [bat_color_table,colorStrs,ROI_rot] = get_rec_day_info(pd,expDate)
             % returns a table of batNums and their corresponding audioLogger color
             % strings used this expDate
             if ~isdatetime(expDate)
@@ -351,7 +399,17 @@ classdef positionData
             assert(sum(dateIdx) == 1)
             rec_logs_exp = pd.recLogs(dateIdx,:);
             bat_color_table = table(rec_logs_exp{1,bat_idx}',rec_logs_exp{1,color_idx}','VariableNames',{'batNum','color'});
+            
+            color_scheme_str = rec_logs_exp.color_scheme{1};
+            color_pred_model = load('color_pred_model.mat',color_scheme_str);
+            colorStrs = color_pred_model.(color_scheme_str).mdl.ClassNames;
+            
+            roi_version_str = rec_logs_exp.roi_version{1};
+            ROI_rot = load('ROI_rot.mat',roi_version_str);
+            ROI_rot = ROI_rot.(roi_version_str);
+            
         end
+        
         function loc = pos2loc(pd,pos,ROI_rot)
             loc = pos/pd.pixel2cm + [ROI_rot.xlims(1) ROI_rot.ylims(1)];
             loc = ((loc - ROI_rot.c)/ROI_rot.R') + ROI_rot.c;
@@ -606,9 +664,9 @@ classdef positionData
         end
         function avgD_by_bat = get_avgD_by_bat(pd,expDist,varargin)
             
-            pnames = {'dType','sessionAvg','clusterThresh'};
-            dflts  = {'dwell',true,pd.clusterThresh};
-            [dType,sessionAvg,cluster_dist_thresh] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+            pnames = {'dType','sessionAvg','clusterThresh','expMotion','moveThresh','minCoverage'};
+            dflts  = {'dwell',true,pd.clusterThresh,[],0.4,0.25};
+            [dType,sessionAvg,cluster_dist_thresh,expMotion,moveThresh,minCoverage] = internal.stats.parseArgs(pnames,dflts,varargin{:});
             
             batNums = setdiff(pd.all_bat_nums,pd.exclBats);
             batPairs = pd.get_bat_pairs('used_bat_nums',batNums);
@@ -617,24 +675,90 @@ classdef positionData
             
             switch dType
                 case 'dwell'
-                    avgD = cellfun(@(expD) cellfun(@(d) sum(d<cluster_dist_thresh)/sum(~isnan(d)),expD.values),expDist.values,'un',0);
+                    dFunc = @(d,~) sum(d<cluster_dist_thresh)/sum(~isnan(d));
                 case 'dist'
-                    avgD = cellfun(@(expD) cellfun(@nanmedian,expD.values),expDist.values,'un',0);
+                    dFunc = @(d,~) nanmedian(d);
             end
-            if sessionAvg
-                avgD = mean(vertcat(avgD{:}),1);
-            else
-                avgD = vertcat(avgD{:});
-            end
-            batNums = cellfun(@(x) strsplit(x,'-'),bat_pair_keys,'un',0);
-            batNums = unique([batNums{:}]);
             
-            avgD_by_bat = cell(1,length(batNums));
-           
+            nBats = length(batNums);
+            nExp = length(expDist.keys);
+            
+            avgD_by_bat = cell(1,nBats);
+            
             for bat_k = 1:length(batNums)
-                avgD_by_bat{bat_k} = mean(avgD(:,contains(bat_pair_keys,batNums{bat_k})),2);
+                current_bat_pair_keys = bat_pair_keys(contains(bat_pair_keys,num2str(batNums(bat_k))));
+                switch dType
+                    case {'dist','dwell'}
+                        current_avgD = nan(nExp,length(current_bat_pair_keys));
+                    case 'nClust'
+                        current_avgD = nan(nExp,nBats);
+                end
+                exp_k = 1;
+                for expDate = expDist.keys
+                    current_exp_dist = expDist(expDate{1});
+                    current_bat_pos = pd.batPos(expDate{1});
+                    current_bat_pos = current_bat_pos(batNums(bat_k));
+                    bat_pair_k = 1;
+                    bat_pair_dist = current_exp_dist(current_bat_pair_keys{1});
+                    nT = length(bat_pair_dist);
+                    nClust = zeros(nT,1);
+                    for bPair = current_bat_pair_keys'
+                        bat_pair_dist = current_exp_dist(bPair{1});
+                        if ~isempty(expMotion)
+                            currentMotion = expMotion(expDate{1});
+                            bat_pair_nums = pd.get_key_pairs(bPair);
+                            motionIdx = true(length(bat_pair_dist),1);
+                            used_motion_idx = true(length(bat_pair_dist),1);
+                            for batNum = bat_pair_nums
+                                batMotion = currentMotion(batNum);
+                                motionIdx = motionIdx & batMotion < moveThresh;
+                                used_motion_idx = ~isnan(batMotion);
+                            end
+                            if sum(motionIdx)/sum(used_motion_idx) < minCoverage
+                                continue
+                            end
+                            bat_pair_dist(~motionIdx) = NaN;
+                        end
+                        nClust = nClust + (bat_pair_dist < cluster_dist_thresh);
+%                         nClust(isnan(bat_pair_dist)) = NaN;
+                        
+                        if ismember(dType,{'dist','dwell'})
+                            current_avgD(exp_k,bat_pair_k) = dFunc(bat_pair_dist);
+                        end
+                        bat_pair_k = bat_pair_k + 1;
+                    end
+                    if strcmp(dType,'nClust')
+                        nClust(any(isnan(current_bat_pos),2)) = NaN;
+                        current_avgD(exp_k,:) = histcounts(nClust,0:nBats)/sum(~isnan(nClust));
+                    end
+                    exp_k = exp_k + 1;
+                end
+                switch dType
+                    case {'dist','dwell'}
+                        avgD_by_bat{bat_k} = nanmean(current_avgD,2);
+                    case 'nClust'
+                        avgD_by_bat{bat_k} = current_avgD;
+                end
+                
+                if sessionAvg
+                    avgD_by_bat{bat_k} = nanmean(avgD_by_bat{bat_k},1);
+                end
             end
-            avgD_by_bat = containers.Map(str2double(batNums),avgD_by_bat);
+            avgD_by_bat = containers.Map(batNums,avgD_by_bat);
+        end
+        function movement_by_bat = get_movement_by_bat(pd,expMotion,varargin)
+            pnames = {'moveThresh','moveSpan'};
+            dflts  = {0.1,100};
+            [moveThresh,moveSpan] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+
+            avgMotion = cellfun(@(expM) cellfun(@(m) sum(logical(movmedian(m > moveThresh,moveSpan)))/sum(~isnan(m)),expM.values),expMotion.values,'un',0);
+            
+            
+            batNums = reshape(setdiff(pd.all_bat_nums,pd.exclBats),1,[]);
+            nBat = length(batNums);
+            movement_by_bat = containers.Map(batNums,cell(1,nBat));
+           
+            
         end
         
         % functions to analyze call distance and neural activity
@@ -1286,7 +1410,7 @@ end
 c2lDist(callID) = [c2lDist(callID) listening_bat_dist];
 end
 
-function pred_centroids = get_pred_centroids(LEDTracks,varargin)
+function pred_centroids = get_pred_centroids(LEDTracks,colorStrs,varargin)
 
 %% Inputs:
 % LEDTracks: results of LED tracking on an entire session (includes
@@ -1302,18 +1426,13 @@ pnames = {'assignmentType','frameLookback'};
 dflts  = {'modelPosterior',5};
 [assignmentType,frameLookback] = internal.stats.parseArgs(pnames,dflts,varargin{:});
 
-if isa(LEDTracks.color_pred_model,'ClassificationECOC')
-    color_names = LEDTracks.color_pred_model.ClassNames;
-else
-   color_names = LEDTracks.color_pred_model.ClassificationSVM.ClassNames; 
-end
-nColor = length(color_names);
+nColor = length(colorStrs);
 
 nFrames = length(LEDTracks.centroidLocs);
 pred_centroids = nan(nFrames,2,nColor);
 for frame_k = 1:nFrames
     for color_k = 1:nColor
-        current_color_idx = strcmp(LEDTracks.predColors{frame_k},color_names{color_k}); % which color relative to the list used in the prediction model are we looking at?
+        current_color_idx = strcmp(LEDTracks.predColors{frame_k},colorStrs{color_k}); % which color relative to the list used in the prediction model are we looking at?
         if sum(current_color_idx) > 1 % if the model predicted more than 1 of the same color, decide which to use
             current_color_idx = find(current_color_idx);
             current_pred_posteriors = LEDTracks.predPosterior{frame_k}(current_color_idx,color_k);
@@ -1346,7 +1465,7 @@ end
 
 end
 
-function pred_centroids_clean = clean_pred_centroids(pd,pred_centroids, varargin)
+function pred_centroids_clean = clean_pred_centroids(pd,pred_centroids,ROI_rot,varargin)
 % First-pass analysis of location data taken from the raw results of the LED_tracking model for a given day.
 
 % first, we remove douplicaitons of color per frame (if you already have the variable locs saved you can load it and it will skip this first part*)
@@ -1373,21 +1492,7 @@ nColor = size(pred_centroids,3);
 pred_centroids_clean = nan(size(pred_centroids));
 
 %% (2) here we rotate so we can limit x,y to max limits, med_filter the data, fill gaps.
-switch pd.sessionType
-    case 'social'
-        switch pd.expType
-            case 'adult_social'
-                ROI_rot = load('ROI_rot.mat'); % this struc contains the rotation matrix, limts of x and y and center of cage values
-            case 'sst'
-                ROI_rot = load('ROI_rot_sst.mat');
-        end
-    case 'vocal'
-        ROI_rot = load('LEDtrackingParams_vocal.mat');
-        ROI_rot.xlims = ROI_rot.ROIIdx(3:4);
-        ROI_rot.ylims = ROI_rot.ROIIdx(1:2);
-        ROI_rot.c = [0 0];
-        ROI_rot.R = [1 0; 0 1];
-end
+
 for color_k = 1:nColor % we run this analysis bat by bat (e.i color by color)
     
     % "rotate" pixels about a center point
@@ -1457,7 +1562,7 @@ function reordered_bat_pos = reorder_bat_pos(pd,batPos,colorStrs,expDate)
 % correspoding to those colors for this expDate and reorders it according
 % to the order of bats present in pd.all_bat_nums
 
-bat_color_table = get_bat_color_table(pd,expDate);
+bat_color_table = get_rec_day_info(pd,expDate);
 
 nBats = length(pd.all_bat_nums);
 nSample = size(batPos,1);
