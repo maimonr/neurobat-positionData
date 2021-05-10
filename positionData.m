@@ -27,7 +27,8 @@ classdef positionData
         clusterThresh
         
         batPos % XY positions of each bat in a nested map, indexed by expDate and then batNum
-        posTS % timestamps of positions in a map indexed by expDate
+        posTS % timestamps in nlg time of positions in a map indexed by expDate
+        pos_start_time % start time (datetime) of first tracking sample
         foodTime
         tracking_data_dir
         video_data_dir
@@ -95,6 +96,7 @@ classdef positionData
             used_exp_idx = true(1,nExp);
             [bat_pos_cell, pos_ts_cell] = deal(cell(1,nExp));
             foodTimes = nan(1,nExp);
+            startTimes = NaT(1,nExp);
             
             for exp_k = 1:nExp
                 led_track_fname = fullfile(led_track_fnames(exp_k).folder,led_track_fnames(exp_k).name);
@@ -134,6 +136,7 @@ classdef positionData
                 % only use timestamps that overlap with the frames
                 % processed in LED tracking
                 timestampsNlg = frame_ts_info.timestamps_nlg(idx_ts);
+                startTimes(exp_k) = frame_ts_info.timestamps(idx_ts(1));
                 
                 % make sure the provided sampling rate is correct
                 assert(round(1e3/median(diff(timestampsNlg))) == pd.video_fs)
@@ -165,6 +168,7 @@ classdef positionData
             pd.batPos = containers.Map(exp_date_strs(used_exp_idx),bat_pos_cell(used_exp_idx));
             pd.posTS = containers.Map(exp_date_strs(used_exp_idx),pos_ts_cell(used_exp_idx));
             pd.foodTime = containers.Map(exp_date_strs(used_exp_idx),foodTimes(used_exp_idx));
+            pd.pos_start_time = containers.Map(exp_date_strs(used_exp_idx),num2cell(startTimes(used_exp_idx)));
             
             % calculate the threshold for in/out of cluster for future use
             if calculate_cluster_thresh
@@ -234,13 +238,23 @@ classdef positionData
             end
             
         end
-        function t = get_time(pd,expDate)
+        function t = get_time(pd,expDate,varargin)
             % utlity function get timestamps for a given expDate. expDate
             % can be either a datetime or a date string.
+            
+            pnames = {'timeType'};
+            dflts  = {'nlg'};
+            [timeType] = internal.stats.parseArgs(pnames,dflts,varargin{:});
+
             if isdatetime(expDate)
                 expDate = datestr(expDate,'mmddyyyy');
             end
             t = pd.posTS(expDate);
+            
+            if strcmp(timeType,'dateTime')
+                t = pd.pos_start_time(expDate) + milliseconds(cumsum([0; diff(t)]));
+            end
+            
         end
         function dist = get_dist(pd,batNums,expDate,varargin)
             % gets the frame by frame euclidean distance between two bats
